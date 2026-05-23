@@ -7,7 +7,8 @@ use cloud_llm_client::WebSearchResponse;
 use futures::FutureExt as _;
 use gpui::{App, Task};
 use language_model::{
-    LanguageModelProviderId, LanguageModelToolResultContent, ZED_CLOUD_PROVIDER_ID,
+    ANTHROPIC_PROVIDER_ID, LanguageModelProviderId, LanguageModelToolResultContent,
+    ZED_CLOUD_PROVIDER_ID,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -62,9 +63,9 @@ impl AgentTool for WebSearchTool {
         "Searching the Web".into()
     }
 
-    /// We currently only support Zed Cloud as a provider.
+    /// Currently supported with Zed Cloud (built-in backend) and Anthropic (via Exa).
     fn supports_provider(provider: &LanguageModelProviderId) -> bool {
-        provider == &ZED_CLOUD_PROVIDER_ID
+        provider == &ZED_CLOUD_PROVIDER_ID || provider == &ANTHROPIC_PROVIDER_ID
     }
 
     fn run(

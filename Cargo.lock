@@ -20524,6 +20524,7 @@ dependencies = [
  "cloud_api_client",
  "cloud_api_types",
  "cloud_llm_client",
+ "credentials_provider",
  "futures 0.3.32",
  "gpui",
  "http_client",

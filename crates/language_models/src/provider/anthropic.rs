@@ -41,8 +41,13 @@ pub struct AnthropicLanguageModelProvider {
 const API_KEY_ENV_VAR_NAME: &str = "ANTHROPIC_API_KEY";
 static API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(API_KEY_ENV_VAR_NAME);
 
+const EXA_API_KEY_ENV_VAR_NAME: &str = "EXA_API_KEY";
+static EXA_API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(EXA_API_KEY_ENV_VAR_NAME);
+const EXA_API_URL: &str = "https://api.exa.ai";
+
 pub struct State {
     api_key_state: ApiKeyState,
+    exa_api_key_state: ApiKeyState,
     credentials_provider: Arc<dyn CredentialsProvider>,
     http_client: Arc<dyn HttpClient>,
     fetched_models: Vec<anthropic::Model>,
@@ -82,18 +87,42 @@ impl State {
         let task = self.api_key_state.load_if_needed(
             api_url,
             |this| &mut this.api_key_state,
+            credentials_provider.clone(),
+            cx,
+        );
+
+        let exa_task = self.exa_api_key_state.load_if_needed(
+            EXA_API_URL.into(),
+            |this| &mut this.exa_api_key_state,
             credentials_provider,
             cx,
         );
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            // The Exa key is optional, so we drive the task without surfacing its error.
+            let _ = exa_task.await;
             if result.is_ok() {
                 this.update(cx, |this, cx| this.restart_fetch_models_task(cx))
                     .ok();
             }
             result
         })
+    }
+
+    fn set_exa_api_key(
+        &mut self,
+        exa_api_key: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let credentials_provider = self.credentials_provider.clone();
+        self.exa_api_key_state.store(
+            EXA_API_URL.into(),
+            exa_api_key,
+            |this| &mut this.exa_api_key_state,
+            credentials_provider,
+            cx,
+        )
     }
 
     fn fetch_models(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
@@ -152,6 +181,10 @@ impl AnthropicLanguageModelProvider {
             .detach();
             State {
                 api_key_state: ApiKeyState::new(Self::api_url(cx), (*API_KEY_ENV_VAR).clone()),
+                exa_api_key_state: ApiKeyState::new(
+                    EXA_API_URL.into(),
+                    (*EXA_API_KEY_ENV_VAR).clone(),
+                ),
                 credentials_provider,
                 http_client: http_client.clone(),
                 fetched_models: Vec::new(),
@@ -510,6 +543,7 @@ impl LanguageModel for AnthropicModel {
 
 struct ConfigurationView {
     api_key_editor: Entity<InputField>,
+    exa_api_key_editor: Entity<InputField>,
     state: Entity<State>,
     load_credentials_task: Option<Task<()>>,
     target_agent: ConfigurationViewTargetAgent,
@@ -517,6 +551,7 @@ struct ConfigurationView {
 
 impl ConfigurationView {
     const PLACEHOLDER_TEXT: &'static str = "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const EXA_PLACEHOLDER_TEXT: &'static str = "Paste your Exa API key";
 
     fn new(
         state: Entity<State>,
@@ -545,6 +580,8 @@ impl ConfigurationView {
 
         Self {
             api_key_editor: cx.new(|cx| InputField::new(window, cx, Self::PLACEHOLDER_TEXT)),
+            exa_api_key_editor: cx
+                .new(|cx| InputField::new(window, cx, Self::EXA_PLACEHOLDER_TEXT)),
             state,
             load_credentials_task,
             target_agent,
@@ -583,8 +620,97 @@ impl ConfigurationView {
         .detach_and_log_err(cx);
     }
 
+    fn save_exa_api_key(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let exa_api_key = self.exa_api_key_editor.read(cx).text(cx);
+        if exa_api_key.is_empty() {
+            return;
+        }
+
+        self.exa_api_key_editor
+            .update(cx, |editor, cx| editor.set_text("", window, cx));
+
+        let state = self.state.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            state
+                .update(cx, |state, cx| state.set_exa_api_key(Some(exa_api_key), cx))
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn reset_exa_api_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.exa_api_key_editor
+            .update(cx, |editor, cx| editor.set_text("", window, cx));
+
+        let state = self.state.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            state
+                .update(cx, |state, cx| state.set_exa_api_key(None, cx))
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn should_render_editor(&self, cx: &mut Context<Self>) -> bool {
         !self.state.read(cx).is_authenticated()
+    }
+
+    fn render_exa_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.state.read(cx);
+        let env_var_set = state.exa_api_key_state.is_from_env_var();
+        let has_key = state.exa_api_key_state.has_key();
+
+        if has_key {
+            let configured_card_label = if env_var_set {
+                format!("Exa API key set in {EXA_API_KEY_ENV_VAR_NAME} environment variable")
+            } else {
+                "Exa API key configured".to_string()
+            };
+            ConfiguredApiCard::new(configured_card_label)
+                .disabled(env_var_set)
+                .on_click(cx.listener(|this, _, window, cx| this.reset_exa_api_key(window, cx)))
+                .when(env_var_set, |this| {
+                    this.tooltip_label(format!(
+                        "To reset your Exa API key, unset the {EXA_API_KEY_ENV_VAR_NAME} environment variable."
+                    ))
+                })
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_1()
+                .on_action(cx.listener(Self::save_exa_api_key))
+                .child(
+                    Label::new("Exa Web Search")
+                        .size(LabelSize::Default),
+                )
+                .child(
+                    Label::new(
+                        "Add an Exa API key to enable the `search_web` tool when using Anthropic.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .child(
+                    List::new().child(
+                        ListBulletItem::new("")
+                            .child(Label::new("Get an API key from"))
+                            .child(ButtonLink::new(
+                                "Exa's dashboard",
+                                "https://dashboard.exa.ai/api-keys",
+                            )),
+                    ),
+                )
+                .child(self.exa_api_key_editor.clone())
+                .child(
+                    Label::new(format!(
+                        "You can also set the {EXA_API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                    ))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .mt_0p5(),
+                )
+                .into_any_element()
+        }
     }
 }
 
@@ -636,14 +762,21 @@ impl Render for ConfigurationView {
                 )
                 .into_any_element()
         } else {
-            ConfiguredApiCard::new(configured_card_label)
-                .disabled(env_var_set)
-                .on_click(cx.listener(|this, _, window, cx| this.reset_api_key(window, cx)))
-                .when(env_var_set, |this| {
-                    this.tooltip_label(format!(
-                    "To reset your API key, unset the {API_KEY_ENV_VAR_NAME} environment variable."
-                ))
-                })
+            v_flex()
+                .gap_3()
+                .child(
+                    ConfiguredApiCard::new(configured_card_label)
+                        .disabled(env_var_set)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.reset_api_key(window, cx)),
+                        )
+                        .when(env_var_set, |this| {
+                            this.tooltip_label(format!(
+                                "To reset your API key, unset the {API_KEY_ENV_VAR_NAME} environment variable."
+                            ))
+                        }),
+                )
+                .child(self.render_exa_section(cx))
                 .into_any_element()
         }
     }
