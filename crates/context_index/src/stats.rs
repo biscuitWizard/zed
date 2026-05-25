@@ -10,6 +10,8 @@ pub struct ContextIndexStats {
     pub scan_progress_done: u64,
     pub scan_progress_total: u64,
     pub enabled: bool,
+    pub chunks_indexed: u64,
+    pub files_chunked: u64,
 }
 
 impl ContextIndexStats {
@@ -29,6 +31,8 @@ impl ContextIndexStats {
             scan_progress_done: self.scan_progress_done,
             scan_progress_total: self.scan_progress_total,
             enabled: self.enabled,
+            chunks_indexed: self.chunks_indexed,
+            files_chunked: self.files_chunked,
         }
     }
 
@@ -50,6 +54,8 @@ impl ContextIndexStats {
             scan_progress_done: msg.scan_progress_done,
             scan_progress_total: msg.scan_progress_total,
             enabled: msg.enabled,
+            chunks_indexed: msg.chunks_indexed,
+            files_chunked: msg.files_chunked,
         }
     }
 }

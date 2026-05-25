@@ -2,7 +2,10 @@ use context_index::api_keys::{
     credentials_provider, embed_api_key_state, embed_api_url, hyde_api_key_state, hyde_api_url,
     rerank_api_key_state, rerank_api_url,
 };
-use gpui::{App, Entity, ScrollHandle, SharedString, TaskExt, prelude::*};
+use context_index::{ContextIndexEvent, ContextIndexStats, context_index_for_project};
+use gpui::{
+    App, Entity, ScrollHandle, SharedString, Subscription, TaskExt, WindowHandle, prelude::*,
+};
 use language_model::ApiKeyState;
 use ui::{ConfiguredApiCard, prelude::*};
 
@@ -11,6 +14,67 @@ use crate::{
     components::{SettingsInputField, SettingsSectionHeader},
 };
 
+struct ContextIndexStatsState {
+    original_window: Option<WindowHandle<workspace::MultiWorkspace>>,
+    stats: Option<ContextIndexStats>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ContextIndexStatsState {
+    fn new(
+        original_window: Option<WindowHandle<workspace::MultiWorkspace>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self {
+            original_window,
+            stats: None,
+            _subscriptions: Vec::new(),
+        };
+        this.subscribe_and_refresh(cx);
+        this
+    }
+
+    fn subscribe_and_refresh(&mut self, cx: &mut Context<Self>) {
+        self._subscriptions.clear();
+
+        for project in self.projects(cx) {
+            let Some(index) = context_index_for_project(&project, cx) else {
+                continue;
+            };
+
+            index.update(cx, |index, cx| index.refresh_store_stats(cx));
+            self._subscriptions
+                .push(cx.subscribe(&index, |this, _, _: &ContextIndexEvent, cx| {
+                    this.refresh(cx);
+                    cx.notify();
+                }));
+        }
+
+        self.refresh(cx);
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.stats = aggregate_stats(
+            self.projects(cx)
+                .into_iter()
+                .filter_map(|project| context_index_for_project(&project, cx)),
+            cx,
+        );
+    }
+
+    fn projects(&self, cx: &App) -> Vec<Entity<project::Project>> {
+        self.original_window
+            .and_then(|window| window.read(cx).ok())
+            .map(|multi_workspace| {
+                multi_workspace
+                    .workspaces()
+                    .map(|workspace| workspace.read(cx).project().clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 pub(crate) fn render_context_index_setup_page(
     settings_window: &SettingsWindow,
     scroll_handle: &ScrollHandle,
@@ -18,6 +82,10 @@ pub(crate) fn render_context_index_setup_page(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let border_color = cx.theme().colors().border_variant;
+    let stats_state = window.use_keyed_state("context-index-stats", cx, |_, cx| {
+        ContextIndexStatsState::new(settings_window.original_window, cx)
+    });
+    let stats = stats_state.read(cx).stats.clone();
 
     v_flex()
         .id("context-index-setup-page")
@@ -41,7 +109,7 @@ pub(crate) fn render_context_index_setup_page(
                     .size(LabelSize::Small),
                 ),
         )
-        .child(stats_card(border_color))
+        .child(stats_card(stats.as_ref(), border_color))
         .child(render_provider_section(
             "Embeddings",
             "Generates vector embeddings for semantic search.",
@@ -75,7 +143,30 @@ pub(crate) fn render_context_index_setup_page(
         .into_any_element()
 }
 
-fn stats_card(border_color: gpui::Hsla) -> impl IntoElement {
+fn stats_card(stats: Option<&ContextIndexStats>, border_color: gpui::Hsla) -> impl IntoElement {
+    let status = match stats {
+        Some(stats) if !stats.enabled => "Disabled".to_string(),
+        Some(stats) if stats.currently_scanning && stats.scan_progress_total > 0 => format!(
+            "Scanning ({}/{})",
+            stats.scan_progress_done, stats.scan_progress_total
+        ),
+        Some(stats) if stats.currently_scanning => "Scanning".to_string(),
+        Some(_) => "Ready".to_string(),
+        None => "No project context".to_string(),
+    };
+    let files_indexed = stats
+        .map(|stats| format_number(stats.files_indexed))
+        .unwrap_or_else(|| "—".to_string());
+    let files_chunked = stats
+        .map(|stats| format_number(stats.files_chunked))
+        .unwrap_or_else(|| "—".to_string());
+    let chunks_indexed = stats
+        .map(|stats| format_number(stats.chunks_indexed))
+        .unwrap_or_else(|| "—".to_string());
+    let bytes_hashed = stats
+        .map(|stats| format_bytes(stats.bytes_hashed))
+        .unwrap_or_else(|| "—".to_string());
+
     v_flex()
         .p_4()
         .rounded_lg()
@@ -83,14 +174,14 @@ fn stats_card(border_color: gpui::Hsla) -> impl IntoElement {
         .border_color(border_color)
         .gap_2()
         .child(Label::new("Indexing Stats").size(LabelSize::Default))
-        .child(stat_row("Status", "Phase 1 — In-memory file hash index"))
-        .child(stat_row(
-            "Note",
-            "Stats update live during scans (see Zed log for details)",
-        ))
+        .child(stat_row("Status", status))
+        .child(stat_row("Files indexed", files_indexed))
+        .child(stat_row("Files chunked", files_chunked))
+        .child(stat_row("Chunks indexed", chunks_indexed))
+        .child(stat_row("Bytes hashed", bytes_hashed))
 }
 
-fn stat_row(label: &str, value: &str) -> impl IntoElement {
+fn stat_row(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
     h_flex()
         .justify_between()
         .child(
@@ -98,7 +189,70 @@ fn stat_row(label: &str, value: &str) -> impl IntoElement {
                 .color(Color::Muted)
                 .size(LabelSize::Small),
         )
-        .child(Label::new(value.to_string()).size(LabelSize::Small))
+        .child(Label::new(value).size(LabelSize::Small))
+}
+
+fn aggregate_stats(
+    indices: impl Iterator<Item = Entity<context_index::ContextIndex>>,
+    cx: &App,
+) -> Option<ContextIndexStats> {
+    let mut aggregate = ContextIndexStats::default();
+    let mut found = false;
+
+    for index in indices {
+        let stats = index.read(cx).stats().clone();
+        found = true;
+        aggregate.files_indexed += stats.files_indexed;
+        aggregate.bytes_hashed += stats.bytes_hashed;
+        aggregate.chunks_indexed += stats.chunks_indexed;
+        aggregate.files_chunked += stats.files_chunked;
+        aggregate.scan_progress_done += stats.scan_progress_done;
+        aggregate.scan_progress_total += stats.scan_progress_total;
+        aggregate.currently_scanning |= stats.currently_scanning;
+        aggregate.enabled |= stats.enabled;
+        aggregate.last_scan_at = match (aggregate.last_scan_at, stats.last_scan_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        aggregate.last_change_at = match (aggregate.last_change_at, stats.last_change_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+    }
+
+    found.then_some(aggregate)
+}
+
+fn format_number(number: u64) -> String {
+    let s = number.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (idx, ch) in s.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn render_provider_section(

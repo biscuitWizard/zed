@@ -32,4 +32,27 @@ pub struct ContextIndexSettingsContent {
 
     /// Configuration for the HyDE (Hypothetical Document Embeddings) service.
     pub hyde: Option<ContextIndexProviderContent>,
+
+    /// Target chunk size in tokens (~4 chars/token). Adjacent sub-budget
+    /// windows are merged up to this limit.
+    ///
+    /// Default: 1024
+    pub chunk_target_tokens: Option<u32>,
+
+    /// Maximum chunk size in tokens. A window is force-split above this.
+    ///
+    /// Default: 3000
+    pub chunk_max_tokens: Option<u32>,
+
+    /// Minimum chunk size in tokens. Chunks below this are dropped
+    /// (unless they are the only chunk for a file).
+    ///
+    /// Default: 64
+    pub chunk_min_tokens: Option<u32>,
+
+    /// Dimensionality of the embedding vectors. Locked at LanceDB table
+    /// creation time; changing this after indexing requires a reset.
+    ///
+    /// Default: 2560
+    pub embedding_dim: Option<u32>,
 }

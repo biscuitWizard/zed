@@ -1,9 +1,11 @@
 pub mod api_keys;
+pub mod chunker;
 pub mod hasher;
 pub mod index;
 pub mod proto_handlers;
 pub mod settings;
 pub mod stats;
+pub mod store;
 
 use collections::HashMap;
 use gpui::{App, AppContext as _, Entity, EntityId, Global};

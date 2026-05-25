@@ -9,6 +9,10 @@ pub struct ContextIndexSettings {
     pub rerank_model: String,
     pub hyde_api_url: String,
     pub hyde_model: String,
+    pub chunk_target_tokens: u32,
+    pub chunk_max_tokens: u32,
+    pub chunk_min_tokens: u32,
+    pub embedding_dim: u32,
 }
 
 impl settings::Settings for ContextIndexSettings {
@@ -26,6 +30,10 @@ impl settings::Settings for ContextIndexSettings {
             rerank_model: rerank.model.unwrap_or_default(),
             hyde_api_url: hyde.api_url.unwrap_or_default(),
             hyde_model: hyde.model.unwrap_or_default(),
+            chunk_target_tokens: ci.chunk_target_tokens.unwrap_or(1024),
+            chunk_max_tokens: ci.chunk_max_tokens.unwrap_or(3000),
+            chunk_min_tokens: ci.chunk_min_tokens.unwrap_or(64),
+            embedding_dim: ci.embedding_dim.unwrap_or(2560),
         }
     }
 }

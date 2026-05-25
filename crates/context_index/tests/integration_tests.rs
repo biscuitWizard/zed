@@ -309,6 +309,8 @@ async fn test_proto_stats_roundtrip(cx: &mut TestAppContext) {
         scan_progress_done: 10,
         scan_progress_total: 42,
         enabled: true,
+        chunks_indexed: 200,
+        files_chunked: 30,
         ..Default::default()
     };
 
@@ -319,6 +321,8 @@ async fn test_proto_stats_roundtrip(cx: &mut TestAppContext) {
     assert_eq!(proto_msg.scan_progress_done, 10);
     assert_eq!(proto_msg.scan_progress_total, 42);
     assert!(proto_msg.enabled);
+    assert_eq!(proto_msg.chunks_indexed, 200);
+    assert_eq!(proto_msg.files_chunked, 30);
 
     let roundtripped = ContextIndexStats::from_proto(&proto_msg);
     assert_eq!(roundtripped.files_indexed, 42);
@@ -327,4 +331,6 @@ async fn test_proto_stats_roundtrip(cx: &mut TestAppContext) {
     assert_eq!(roundtripped.scan_progress_done, 10);
     assert_eq!(roundtripped.scan_progress_total, 42);
     assert!(roundtripped.enabled);
+    assert_eq!(roundtripped.chunks_indexed, 200);
+    assert_eq!(roundtripped.files_chunked, 30);
 }

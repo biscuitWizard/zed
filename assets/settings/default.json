@@ -1261,6 +1261,16 @@
       "api_url": "http://192.168.1.50:8001/v1",
       "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     },
+    // Target chunk size in tokens (~4 chars/token). Adjacent sub-budget
+    // windows are merged up to this limit.
+    "chunk_target_tokens": 1024,
+    // Maximum chunk size in tokens. A window is force-split above this.
+    "chunk_max_tokens": 3000,
+    // Minimum chunk size in tokens. Chunks below this are dropped.
+    "chunk_min_tokens": 64,
+    // Embedding vector dimensionality. Locked at table creation;
+    // changing after indexing requires a reset.
+    "embedding_dim": 2560,
   },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,

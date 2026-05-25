@@ -353,6 +353,8 @@ message ContextIndexStats {
   uint64 scan_progress_done = 6;
   uint64 scan_progress_total = 7;
   bool enabled = 8;
+  uint64 chunks_indexed = 9;
+  uint64 files_chunked = 10;
 }
 
 message ResetContextIndex {
