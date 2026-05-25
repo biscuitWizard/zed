@@ -1,8 +1,9 @@
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentThreadEntry, AssistantMessage, AssistantMessageChunk,
-    AuthRequired, LoadError, MaxOutputTokensError, MentionUri, PermissionOptionChoice,
-    PermissionOptions, PermissionPattern, RetryStatus, SelectedPermissionOutcome, ThreadStatus,
-    ToolCall, ToolCallContent, ToolCallStatus, UserMessageId,
+    AuthRequired, LoadError, MaxOutputTokensError, MentionUri, MultiChoiceOutcome,
+    PermissionOptionChoice, PermissionOptions, PermissionPattern, RetryStatus,
+    SelectedPermissionOutcome, ThreadStatus, ToolCall, ToolCallContent, ToolCallStatus,
+    UserMessageId,
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
@@ -416,6 +417,23 @@ impl Conversation {
         cx.notify();
     }
 
+    pub fn submit_multi_choice(
+        &mut self,
+        session_id: acp::SessionId,
+        tool_call_id: acp::ToolCallId,
+        outcome: MultiChoiceOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self.threads.get(&session_id) else {
+            return;
+        };
+
+        thread.update(cx, |thread, cx| {
+            thread.submit_multi_choice_answer(tool_call_id, outcome, cx);
+        });
+        cx.notify();
+    }
+
     fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
         for thread in self.threads.values() {
             thread.update(cx, |thread, cx| {
@@ -448,6 +466,9 @@ fn resolve_outcome_from_selection(
                 option.option_id.clone(),
                 option.kind,
             ));
+        }
+        PermissionOptions::MultiChoice { .. } => {
+            return None;
         }
     };
 

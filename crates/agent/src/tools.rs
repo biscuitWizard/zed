@@ -1,4 +1,5 @@
 mod apply_code_action_tool;
+mod ask_question_tool;
 mod context_server_registry;
 mod copy_path_tool;
 mod create_directory_tool;
@@ -60,6 +61,7 @@ where
 }
 
 pub use apply_code_action_tool::*;
+pub use ask_question_tool::*;
 pub use context_server_registry::*;
 pub use copy_path_tool::*;
 pub use create_directory_tool::*;
@@ -157,6 +159,7 @@ macro_rules! tools {
 
 tools! {
     ApplyCodeActionTool,
+    AskQuestionTool,
     CopyPathTool,
     CreateDirectoryTool,
     DeletePathTool,

@@ -1,7 +1,7 @@
 use crate::{
-    ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
-    DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
-    FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
+    ApplyCodeActionTool, AskQuestionTool, CodeActionStore, ContextServerRegistry, CopyPathTool,
+    CreateDirectoryTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
+    FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
     ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool, RenameTool, SpawnAgentTool,
     SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
     UpdatePlanTool, UpdateTitleTool, UserAgentsMd, WebSearchTool, WriteFileTool, WritePlanFileTool,
@@ -692,6 +692,7 @@ pub enum ThreadEvent {
     ToolCallUpdate(acp_thread::ToolCallUpdate),
     Plan(acp::Plan),
     ToolCallAuthorization(ToolCallAuthorization),
+    MultiChoiceAuthorization(MultiChoiceAuthorization),
     SubagentSpawned(acp::SessionId),
     Retry(acp_thread::RetryStatus),
     Stop(acp::StopReason),
@@ -942,6 +943,13 @@ pub struct ToolCallAuthorization {
     pub response: oneshot::Sender<acp_thread::SelectedPermissionOutcome>,
     pub context: Option<ToolPermissionContext>,
     pub kind: acp_thread::AuthorizationKind,
+}
+
+#[derive(Debug)]
+pub struct MultiChoiceAuthorization {
+    pub tool_call: acp::ToolCallUpdate,
+    pub options: acp_thread::PermissionOptions,
+    pub response: oneshot::Sender<acp_thread::MultiChoiceOutcome>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1703,6 +1711,7 @@ impl Thread {
         self.add_tool(TerminalTool::new(self.project.clone(), environment.clone()));
         self.add_tool(WebSearchTool);
 
+        self.add_tool(AskQuestionTool);
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);
@@ -4083,6 +4092,56 @@ impl ToolCallEventStream {
         })
     }
 
+    /// Prompts the user with a structured multi-choice question form.
+    ///
+    /// Unlike [`Self::prompt_for_decision`], this supports multiple questions
+    /// (each with their own set of options and optional `allow_multiple`
+    /// semantics) plus an optional free-text "More details" textarea.
+    /// The caller receives the full set of answers once the user submits.
+    pub fn prompt_for_questions(
+        &self,
+        questions: Vec<acp_thread::MultiChoiceQuestion>,
+        title: Option<String>,
+        allow_free_text_details: bool,
+        free_text_details_placeholder: Option<String>,
+        cx: &mut App,
+    ) -> Task<Result<acp_thread::MultiChoiceOutcome>> {
+        let options = acp_thread::PermissionOptions::MultiChoice {
+            questions,
+            title: title.clone(),
+            allow_free_text_details,
+            free_text_details_placeholder,
+        };
+        let stream = self.stream.clone();
+        let tool_use_id = self.tool_use_id.clone();
+        cx.spawn(async move |_cx| {
+            let mut fields = acp::ToolCallUpdateFields::new();
+            if let Some(title) = title {
+                fields = fields.title(title);
+            }
+
+            let (response_tx, response_rx) = oneshot::channel();
+            if let Err(error) = stream
+                .0
+                .unbounded_send(Ok(ThreadEvent::MultiChoiceAuthorization(
+                    MultiChoiceAuthorization {
+                        tool_call: acp::ToolCallUpdate::new(tool_use_id.to_string(), fields),
+                        options,
+                        response: response_tx,
+                    },
+                )))
+            {
+                log::error!("Failed to send multi-choice question prompt: {error}");
+                return Err(anyhow!("Failed to send multi-choice question prompt: {error}"));
+            }
+
+            let outcome = response_rx
+                .await
+                .map_err(|_| anyhow!("multi-choice channel closed (cancelled)"))?;
+            Ok(outcome)
+        })
+    }
+
     /// Prompts the user for authorization.
     ///
     /// When `check_settings` is `Some`, this gate is settings-driven: the
@@ -4327,6 +4386,15 @@ impl ToolCallEventStreamReceiver {
             auth
         } else {
             panic!("Expected ToolCallAuthorization but got: {:?}", event);
+        }
+    }
+
+    pub async fn expect_multi_choice_authorization(&mut self) -> MultiChoiceAuthorization {
+        let event = self.0.next().await;
+        if let Some(Ok(ThreadEvent::MultiChoiceAuthorization(auth))) = event {
+            auth
+        } else {
+            panic!("Expected MultiChoiceAuthorization but got: {:?}", event);
         }
     }
 

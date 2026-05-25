@@ -561,10 +561,19 @@ impl From<SelectedPermissionOutcome> for acp::SelectedPermissionOutcome {
     }
 }
 
+/// Outcome from a `MultiChoice` question form: selected option IDs per
+/// question and an optional free-text details string.
+#[derive(Debug, Clone)]
+pub struct MultiChoiceOutcome {
+    pub answers: HashMap<String, Vec<String>>,
+    pub details: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum RequestPermissionOutcome {
     Cancelled,
     Selected(SelectedPermissionOutcome),
+    MultiChoice(MultiChoiceOutcome),
 }
 
 impl From<RequestPermissionOutcome> for acp::RequestPermissionOutcome {
@@ -572,6 +581,11 @@ impl From<RequestPermissionOutcome> for acp::RequestPermissionOutcome {
         match value {
             RequestPermissionOutcome::Cancelled => Self::Cancelled,
             RequestPermissionOutcome::Selected(outcome) => Self::Selected(outcome.into()),
+            RequestPermissionOutcome::MultiChoice(_) => {
+                // MultiChoice outcomes are handled internally; they don't
+                // map to the external ACP protocol.
+                Self::Cancelled
+            }
         }
     }
 }
@@ -602,6 +616,11 @@ pub enum ToolCallStatus {
         options: PermissionOptions,
         respond_tx: oneshot::Sender<SelectedPermissionOutcome>,
         kind: AuthorizationKind,
+    },
+    /// The tool call is waiting for the user to answer a multi-choice form.
+    WaitingForMultiChoice {
+        options: PermissionOptions,
+        respond_tx: oneshot::Sender<MultiChoiceOutcome>,
     },
     /// The tool call is currently running.
     InProgress,
@@ -635,6 +654,7 @@ impl Display for ToolCallStatus {
             match self {
                 ToolCallStatus::Pending => "Pending",
                 ToolCallStatus::WaitingForConfirmation { .. } => "Waiting for confirmation",
+                ToolCallStatus::WaitingForMultiChoice { .. } => "Waiting for answer",
                 ToolCallStatus::InProgress => "In Progress",
                 ToolCallStatus::Completed => "Completed",
                 ToolCallStatus::Failed => "Failed",
@@ -1461,6 +1481,10 @@ impl AcpThread {
                 AgentThreadEntry::ToolCall(ToolCall {
                     status: ToolCallStatus::WaitingForConfirmation { .. },
                     ..
+                })
+                | AgentThreadEntry::ToolCall(ToolCall {
+                    status: ToolCallStatus::WaitingForMultiChoice { .. },
+                    ..
                 }) => return true,
                 AgentThreadEntry::ToolCall(_)
                 | AgentThreadEntry::AssistantMessage(_)
@@ -2250,6 +2274,57 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
     }
 
+    pub fn request_multi_choice_authorization(
+        &mut self,
+        tool_call: acp::ToolCallUpdate,
+        options: PermissionOptions,
+        cx: &mut Context<Self>,
+    ) -> Result<Task<RequestPermissionOutcome>> {
+        let (tx, rx) = oneshot::channel();
+
+        let status = ToolCallStatus::WaitingForMultiChoice {
+            options,
+            respond_tx: tx,
+        };
+
+        let tool_call_id = tool_call.tool_call_id.clone();
+        self.upsert_tool_call_inner(tool_call, status, cx)?;
+        cx.emit(AcpThreadEvent::ToolAuthorizationRequested(
+            tool_call_id.clone(),
+        ));
+
+        Ok(cx.spawn(async move |this, cx| {
+            let outcome = match rx.await {
+                Ok(outcome) => RequestPermissionOutcome::MultiChoice(outcome),
+                Err(oneshot::Canceled) => RequestPermissionOutcome::Cancelled,
+            };
+            this.update(cx, |_this, cx| {
+                cx.emit(AcpThreadEvent::ToolAuthorizationReceived(tool_call_id))
+            })
+            .ok();
+            outcome
+        }))
+    }
+
+    pub fn submit_multi_choice_answer(
+        &mut self,
+        id: acp::ToolCallId,
+        outcome: MultiChoiceOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ix, call)) = self.tool_call_mut(&id) else {
+            return;
+        };
+
+        let curr_status = mem::replace(&mut call.status, ToolCallStatus::InProgress);
+
+        if let ToolCallStatus::WaitingForMultiChoice { respond_tx, .. } = curr_status {
+            respond_tx.send(outcome).ok();
+        }
+
+        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+    }
+
     pub fn plan(&self) -> &Plan {
         &self.plan
     }
@@ -2544,6 +2619,7 @@ impl AcpThread {
                     call.status,
                     ToolCallStatus::Pending
                         | ToolCallStatus::WaitingForConfirmation { .. }
+                        | ToolCallStatus::WaitingForMultiChoice { .. }
                         | ToolCallStatus::InProgress
                 );
 

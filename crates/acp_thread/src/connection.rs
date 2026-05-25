@@ -526,6 +526,21 @@ pub struct PermissionPattern {
 }
 
 #[derive(Debug, Clone)]
+pub struct MultiChoiceOption {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiChoiceQuestion {
+    pub id: String,
+    pub question: String,
+    pub options: Vec<MultiChoiceOption>,
+    pub allow_multiple: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum PermissionOptions {
     Flat(Vec<acp::PermissionOption>),
     Dropdown(Vec<PermissionOptionChoice>),
@@ -533,6 +548,12 @@ pub enum PermissionOptions {
         choices: Vec<PermissionOptionChoice>,
         patterns: Vec<PermissionPattern>,
         tool_name: String,
+    },
+    MultiChoice {
+        questions: Vec<MultiChoiceQuestion>,
+        title: Option<String>,
+        allow_free_text_details: bool,
+        free_text_details_placeholder: Option<String>,
     },
 }
 
@@ -542,6 +563,7 @@ impl PermissionOptions {
             PermissionOptions::Flat(options) => options.is_empty(),
             PermissionOptions::Dropdown(options) => options.is_empty(),
             PermissionOptions::DropdownWithPatterns { choices, .. } => choices.is_empty(),
+            PermissionOptions::MultiChoice { questions, .. } => questions.is_empty(),
         }
     }
 
@@ -571,6 +593,7 @@ impl PermissionOptions {
                     }
                 })
             }
+            PermissionOptions::MultiChoice { .. } => None,
         }
     }
 

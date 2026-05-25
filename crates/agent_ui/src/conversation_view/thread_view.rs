@@ -267,6 +267,44 @@ impl PermissionSelection {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct MultiChoiceFormState {
+    pub selections: HashMap<String, std::collections::BTreeSet<String>>,
+    pub details: String,
+}
+
+impl MultiChoiceFormState {
+    fn new() -> Self {
+        Self {
+            selections: HashMap::default(),
+            details: String::new(),
+        }
+    }
+
+    fn toggle_option(&mut self, question_id: &str, option_id: &str, allow_multiple: bool) {
+        let entry = self
+            .selections
+            .entry(question_id.to_string())
+            .or_default();
+        if allow_multiple {
+            if entry.contains(option_id) {
+                entry.remove(option_id);
+            } else {
+                entry.insert(option_id.to_string());
+            }
+        } else {
+            entry.clear();
+            entry.insert(option_id.to_string());
+        }
+    }
+
+    fn is_option_selected(&self, question_id: &str, option_id: &str) -> bool {
+        self.selections
+            .get(question_id)
+            .is_some_and(|s| s.contains(option_id))
+    }
+}
+
 pub struct ThreadView {
     pub(crate) root_thread_id: ThreadId,
     pub session_id: acp::SessionId,
@@ -321,6 +359,8 @@ pub struct ThreadView {
     pub new_server_version_available: Option<SharedString>,
     pub resumed_without_history: bool,
     pub(crate) permission_selections: HashMap<acp::ToolCallId, PermissionSelection>,
+    pub(crate) multi_choice_selections:
+        HashMap<acp::ToolCallId, MultiChoiceFormState>,
     pub _cancel_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
     _draft_resolve_task: Option<Task<()>>,
@@ -616,6 +656,7 @@ impl ThreadView {
             is_loading_contents: false,
             new_server_version_available: None,
             permission_selections: HashMap::default(),
+            multi_choice_selections: HashMap::default(),
             _cancel_task: None,
             _save_task: None,
             _draft_resolve_task: None,
@@ -1822,6 +1863,28 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub fn submit_multi_choice(
+        &mut self,
+        session_id: acp::SessionId,
+        tool_call_id: acp::ToolCallId,
+        outcome: MultiChoiceOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.multi_choice_selections.remove(&tool_call_id);
+        self.conversation.update(cx, |conversation, cx| {
+            conversation.submit_multi_choice(session_id, tool_call_id, outcome, cx);
+        });
+        if self.should_be_following {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.follow(CollaboratorId::Agent, window, cx);
+                })
+                .ok();
+        }
+        cx.notify();
+    }
+
     pub fn allow_always(&mut self, _: &AllowAlways, window: &mut Window, cx: &mut Context<Self>) {
         self.authorize_pending_tool_call(acp::PermissionOptionKind::AllowAlways, window, cx);
     }
@@ -1860,6 +1923,7 @@ impl ThreadView {
             matches!(
                 tool_call.status,
                 ToolCallStatus::WaitingForConfirmation { .. }
+                    | ToolCallStatus::WaitingForMultiChoice { .. }
             )
         } else {
             false
@@ -6334,7 +6398,7 @@ impl ThreadView {
         );
 
         let confirmation_options = match &tool_call.status {
-            ToolCallStatus::WaitingForConfirmation { options, .. } => Some(options),
+            ToolCallStatus::WaitingForConfirmation { options, kind, .. } => Some((options, *kind)),
             _ => None,
         };
         let needs_confirmation = confirmation_options.is_some();
@@ -6586,12 +6650,13 @@ impl ThreadView {
                         })),
                 )
             })
-            .when_some(confirmation_options, |this, options| {
+            .when_some(confirmation_options, |this, (options, kind)| {
                 let is_first = self.is_first_tool_call(active_session_id, &tool_call.id, cx);
                 this.child(self.render_permission_buttons(
                     self.thread.read(cx).session_id().clone(),
                     is_first,
                     options,
+                    kind,
                     entry_ix,
                     tool_call.id.clone(),
                     focus_handle,
@@ -6692,6 +6757,7 @@ impl ThreadView {
         let needs_confirmation = matches!(
             tool_call.status,
             ToolCallStatus::WaitingForConfirmation { .. }
+                | ToolCallStatus::WaitingForMultiChoice { .. }
         );
         let is_terminal_tool = matches!(tool_call.kind, acp::ToolKind::Execute);
 
@@ -6734,7 +6800,9 @@ impl ThreadView {
 
         let tool_output_display = if is_open {
             match &tool_call.status {
-                ToolCallStatus::WaitingForConfirmation { options, .. } => v_flex()
+                ToolCallStatus::WaitingForConfirmation {
+                    options, kind, ..
+                } => v_flex()
                     .w_full()
                     .children(
                         tool_call
@@ -6827,12 +6895,24 @@ impl ThreadView {
                         self.thread.read(cx).session_id().clone(),
                         self.is_first_tool_call(active_session_id, &tool_call.id, cx),
                         options,
+                        *kind,
                         entry_ix,
                         tool_call.id.clone(),
                         focus_handle,
                         cx,
                     ))
                     .into_any(),
+                ToolCallStatus::WaitingForMultiChoice { options, .. } => {
+                    self.render_multi_choice_form(
+                        self.thread.read(cx).session_id().clone(),
+                        options,
+                        entry_ix,
+                        tool_call.id.clone(),
+                        focus_handle,
+                        cx,
+                    )
+                    .into_any()
+                }
                 ToolCallStatus::Pending | ToolCallStatus::InProgress
                     if is_edit
                         && tool_call.content.is_empty()
@@ -7128,6 +7208,7 @@ impl ThreadView {
         session_id: acp::SessionId,
         is_first: bool,
         options: &PermissionOptions,
+        kind: acp_thread::AuthorizationKind,
         entry_ix: usize,
         tool_call_id: acp::ToolCallId,
         focus_handle: &FocusHandle,
@@ -7138,6 +7219,7 @@ impl ThreadView {
                 session_id,
                 is_first,
                 options,
+                kind,
                 entry_ix,
                 tool_call_id,
                 focus_handle,
@@ -7167,7 +7249,236 @@ impl ThreadView {
                 focus_handle,
                 cx,
             ),
+            PermissionOptions::MultiChoice { .. } => {
+                // MultiChoice is rendered via render_multi_choice_form, not here.
+                div()
+            }
         }
+    }
+
+    fn render_multi_choice_form(
+        &self,
+        session_id: acp::SessionId,
+        options: &PermissionOptions,
+        _entry_ix: usize,
+        tool_call_id: acp::ToolCallId,
+        _focus_handle: &FocusHandle,
+        cx: &Context<Self>,
+    ) -> Div {
+        let PermissionOptions::MultiChoice {
+            questions,
+            title,
+            allow_free_text_details,
+            free_text_details_placeholder,
+        } = options
+        else {
+            return div();
+        };
+
+        let state = self
+            .multi_choice_selections
+            .get(&tool_call_id)
+            .cloned()
+            .unwrap_or_else(MultiChoiceFormState::new);
+
+        let mut form = v_flex()
+            .p_2()
+            .gap_2()
+            .border_t_1()
+            .border_color(self.tool_card_border_color(cx))
+            .w_full();
+
+        if let Some(title) = title {
+            form = form.child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title.clone()),
+            );
+        }
+
+        for question in questions {
+            let question_id = question.id.clone();
+            let allow_multiple = question.allow_multiple;
+
+            let mut question_group = v_flex().gap_1().child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(question.question.clone()),
+            );
+
+            for option in &question.options {
+                let is_selected = state.is_option_selected(&question_id, &option.id);
+                let option_id_str = option.id.clone();
+                let q_id = question_id.clone();
+                let tc_id = tool_call_id.clone();
+
+                let icon = if is_selected {
+                    IconName::Check
+                } else {
+                    IconName::Circle
+                };
+
+                let mut option_row = h_flex()
+                    .id(SharedString::from(format!(
+                        "mc-{}-{}",
+                        question_id, option.id
+                    )))
+                    .gap_2()
+                    .py_0p5()
+                    .px_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                        let state = this
+                            .multi_choice_selections
+                            .entry(tc_id.clone())
+                            .or_insert_with(MultiChoiceFormState::new);
+                        state.toggle_option(&q_id, &option_id_str, allow_multiple);
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(icon)
+                            .size(IconSize::Small)
+                            .color(if is_selected {
+                                Color::Accent
+                            } else {
+                                Color::Muted
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .child(div().text_sm().child(option.label.clone()))
+                            .when_some(option.description.as_ref(), |el, desc| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().colors().text_muted)
+                                        .child(desc.clone()),
+                                )
+                            }),
+                    );
+
+                if is_selected {
+                    option_row = option_row.bg(cx.theme().colors().element_selected);
+                }
+
+                question_group = question_group.child(option_row);
+            }
+
+            form = form.child(question_group);
+        }
+
+        if *allow_free_text_details {
+            let _placeholder = free_text_details_placeholder
+                .clone()
+                .unwrap_or_else(|| "More details (optional)…".to_string());
+            let current_details = state.details.clone();
+
+            form = form.child(
+                v_flex().gap_0p5().child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("More details (optional)"),
+                )
+                .child(
+                    div()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .p_1()
+                        .text_sm()
+                        .child(if current_details.is_empty() {
+                            div()
+                                .text_color(cx.theme().colors().text_placeholder)
+                                .child(_placeholder)
+                        } else {
+                            div().child(current_details)
+                        }),
+                ),
+            );
+        }
+
+        let session_for_submit = session_id.clone();
+        let tc_for_submit = tool_call_id.clone();
+        let questions_for_validation = questions.clone();
+        let state_for_submit = state.clone();
+
+        let all_answered = questions_for_validation.iter().all(|q| {
+            state_for_submit
+                .selections
+                .get(&q.id)
+                .is_some_and(|s| !s.is_empty())
+        });
+
+        let session_for_cancel = session_id;
+        let tc_for_cancel = tool_call_id;
+
+        form = form.child(
+            h_flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("multi-choice-cancel", "Cancel")
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Outlined)
+                        .on_click(cx.listener(
+                            move |this: &mut Self, _, window, cx| {
+                                let outcome = MultiChoiceOutcome {
+                                    answers: std::collections::HashMap::new(),
+                                    details: None,
+                                };
+                                this.submit_multi_choice(
+                                    session_for_cancel.clone(),
+                                    tc_for_cancel.clone(),
+                                    outcome,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                )
+                .child(
+                    Button::new("multi-choice-submit", "Submit")
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Filled)
+                        .disabled(!all_answered)
+                        .on_click(cx.listener(
+                            move |this: &mut Self, _, window, cx| {
+                                let form_state = this
+                                    .multi_choice_selections
+                                    .get(&tc_for_submit)
+                                    .cloned()
+                                    .unwrap_or_else(MultiChoiceFormState::new);
+
+                                let answers: std::collections::HashMap<String, Vec<String>> =
+                                    form_state
+                                        .selections
+                                        .into_iter()
+                                        .map(|(k, v)| (k, v.into_iter().collect()))
+                                        .collect();
+                                let details = if form_state.details.is_empty() {
+                                    None
+                                } else {
+                                    Some(form_state.details)
+                                };
+                                let outcome = MultiChoiceOutcome { answers, details };
+                                this.submit_multi_choice(
+                                    session_for_submit.clone(),
+                                    tc_for_submit.clone(),
+                                    outcome,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                ),
+        );
+
+        form
     }
 
     fn render_permission_buttons_with_dropdown(
@@ -7562,11 +7873,13 @@ impl ThreadView {
         session_id: acp::SessionId,
         is_first: bool,
         options: &[acp::PermissionOption],
+        kind: acp_thread::AuthorizationKind,
         entry_ix: usize,
         tool_call_id: acp::ToolCallId,
         focus_handle: &FocusHandle,
         cx: &Context<Self>,
     ) -> Div {
+        let is_action_choice = matches!(kind, acp_thread::AuthorizationKind::ActionChoice);
         let mut seen_kinds: ArrayVec<acp::PermissionOptionKind, 3, u8> = ArrayVec::new();
 
         div()
@@ -7580,6 +7893,10 @@ impl ThreadView {
                 let option_id = SharedString::from(option.option_id.0.clone());
                 Button::new((option_id, entry_ix), option.name.clone())
                     .map(|this| {
+                        if is_action_choice {
+                            return this;
+                        }
+
                         let (icon, action) = match option.kind {
                             acp::PermissionOptionKind::AllowOnce => (
                                 Icon::new(IconName::Check)
@@ -8219,6 +8536,7 @@ impl ThreadView {
             ToolCallStatus::Pending
                 | ToolCallStatus::InProgress
                 | ToolCallStatus::WaitingForConfirmation { .. }
+                | ToolCallStatus::WaitingForMultiChoice { .. }
         );
 
         let is_failed = matches!(

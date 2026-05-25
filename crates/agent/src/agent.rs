@@ -1889,6 +1889,33 @@ impl NativeAgentConnection {
                                 })
                                 .detach();
                             }
+                            ThreadEvent::MultiChoiceAuthorization(MultiChoiceAuthorization {
+                                tool_call,
+                                options,
+                                response,
+                            }) => {
+                                let outcome_task = acp_thread.update(cx, |thread, cx| {
+                                    thread.request_multi_choice_authorization(
+                                        tool_call, options, cx,
+                                    )
+                                })??;
+                                cx.background_spawn(async move {
+                                    if let acp_thread::RequestPermissionOutcome::MultiChoice(
+                                        outcome,
+                                    ) = outcome_task.await
+                                    {
+                                        response
+                                            .send(outcome)
+                                            .map_err(|_| {
+                                                anyhow!(
+                                                    "multi-choice authorization receiver was dropped"
+                                                )
+                                            })
+                                            .log_err();
+                                    }
+                                })
+                                .detach();
+                            }
                             ThreadEvent::ToolCall(tool_call) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.upsert_tool_call(tool_call, cx)
