@@ -39,8 +39,9 @@ pub struct ContextIndex {
     enabled: bool,
     _subscriptions: Vec<Subscription>,
     _pending_scan: Option<Task<()>>,
-    _debounce_task: Option<Task<()>>,
+    _rehash_task: Option<Task<()>>,
     pending_rehash_paths: Vec<(WorktreeId, Arc<str>, PathBuf)>,
+    rehash_running: bool,
 }
 
 impl ContextIndex {
@@ -58,7 +59,7 @@ impl ContextIndex {
             subscriptions.push(cx.subscribe(&worktree_store, Self::on_worktree_store_event));
         }
 
-        let mut this = Self {
+        Self {
             fs,
             worktree_store,
             index: HashMap::default(),
@@ -69,15 +70,10 @@ impl ContextIndex {
             enabled,
             _subscriptions: subscriptions,
             _pending_scan: None,
-            _debounce_task: None,
+            _rehash_task: None,
             pending_rehash_paths: Vec::new(),
-        };
-
-        if enabled {
-            this.start_full_scan(cx);
+            rehash_running: false,
         }
-
-        this
     }
 
     pub fn stats(&self) -> &ContextIndexStats {
@@ -108,8 +104,9 @@ impl ContextIndex {
             );
             self.index.clear();
             self._pending_scan = None;
-            self._debounce_task = None;
+            self._rehash_task = None;
             self.pending_rehash_paths.clear();
+            self.rehash_running = false;
             self.stats = ContextIndexStats {
                 enabled: false,
                 ..Default::default()
@@ -130,8 +127,9 @@ impl ContextIndex {
         self.stats.files_indexed = 0;
         self.stats.bytes_hashed = 0;
         self._pending_scan = None;
-        self._debounce_task = None;
+        self._rehash_task = None;
         self.pending_rehash_paths.clear();
+        self.rehash_running = false;
 
         if self.enabled {
             self.start_full_scan(cx);
@@ -274,6 +272,7 @@ impl ContextIndex {
                     return;
                 }
 
+
                 self.stats.last_change_at = Some(Instant::now());
 
                 let worktree_store = self.worktree_store.read(cx);
@@ -328,8 +327,7 @@ impl ContextIndex {
                 cx.emit(ContextIndexEvent::StatsUpdated);
             }
             WorktreeStoreEvent::WorktreeAdded(_worktree) => {
-                log::info!("[context_index] worktree added, rescanning");
-                self.start_full_scan(cx);
+                log::info!("[context_index] worktree added");
             }
             _ => {}
         }
@@ -341,85 +339,83 @@ impl ContextIndex {
         cx: &mut Context<Self>,
     ) {
         self.pending_rehash_paths.extend(paths);
+
+        if self.rehash_running {
+            return;
+        }
+
+        self.rehash_running = true;
         let fs = self.fs.clone();
 
-        self._debounce_task = Some(cx.spawn(async move |this, cx| {
+        self._rehash_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(DEBOUNCE_DURATION)
                 .await;
 
-            let paths_to_hash = this
-                .update(cx, |this, _cx| std::mem::take(&mut this.pending_rehash_paths))
-                .unwrap_or_default();
+            loop {
+                let paths_to_hash = this
+                    .update(cx, |this, _cx| std::mem::take(&mut this.pending_rehash_paths))
+                    .unwrap_or_default();
 
-            if paths_to_hash.is_empty() {
-                return;
-            }
+                if paths_to_hash.is_empty() {
+                    let _ = this.update(cx, |this, _cx| {
+                        this.rehash_running = false;
+                        this._rehash_task = None;
+                    });
+                    return;
+                }
 
-            let mut results: Vec<(WorktreeId, Arc<str>, Option<FileEntry>)> = Vec::new();
-            for (wt_id, rel_str, abs_path) in &paths_to_hash {
-                match hasher::hash_file(fs.as_ref(), abs_path).await {
-                    Ok(Some(sha)) => {
-                        let metadata = fs.metadata(abs_path).await.ok().flatten();
-                        let size = metadata.map(|m| m.len).unwrap_or(0);
-                        results.push((
-                            *wt_id,
-                            rel_str.clone(),
-                            Some(FileEntry {
-                                sha,
-                                size,
-                                hashed_at: Instant::now(),
-                            }),
-                        ));
-                    }
-                    Ok(None) => {
-                        results.push((*wt_id, rel_str.clone(), None));
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[context_index] rehash failed for {}: {}",
-                            abs_path.display(),
-                            e
-                        );
+                let mut results: Vec<(WorktreeId, Arc<str>, Option<FileEntry>)> = Vec::new();
+                for (wt_id, rel_str, abs_path) in &paths_to_hash {
+                    match hasher::hash_file(fs.as_ref(), abs_path).await {
+                        Ok(Some(sha)) => {
+                            let metadata = fs.metadata(abs_path).await.ok().flatten();
+                            let size = metadata.map(|m| m.len).unwrap_or(0);
+                            results.push((
+                                *wt_id,
+                                rel_str.clone(),
+                                Some(FileEntry {
+                                    sha,
+                                    size,
+                                    hashed_at: Instant::now(),
+                                }),
+                            ));
+                        }
+                        Ok(None) => {
+                            results.push((*wt_id, rel_str.clone(), None));
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[context_index] rehash failed for {}: {}",
+                                abs_path.display(),
+                                e
+                            );
+                        }
                     }
                 }
-            }
 
-            let _ = this.update(cx, |this, cx| {
-                for (wt_id, rel_str, entry) in results {
-                    let key = (wt_id, rel_str.clone());
-                    match entry {
-                        Some(new_entry) => {
-                            let old_sha = this.index.get(&key).map(|e| e.sha);
-                            if old_sha.as_ref() != Some(&new_entry.sha) {
-                                if let Some(old) = old_sha {
-                                    log::info!(
-                                        "[context_index] file changed: {} (sha {} -> {})",
-                                        rel_str,
-                                        &hasher::hash_to_hex(&old)[..8],
-                                        &hasher::hash_to_hex(&new_entry.sha)[..8]
-                                    );
-                                } else {
-                                    log::info!(
-                                        "[context_index] file added: {} sha={}",
-                                        rel_str,
-                                        &hasher::hash_to_hex(&new_entry.sha)[..8]
-                                    );
-                                }
+                let _ = this.update(cx, |this, cx| {
+                    for (wt_id, rel_str, entry) in results {
+                        let key = (wt_id, rel_str.clone());
+                        match entry {
+                            Some(new_entry) => {
+                                this.stats.bytes_hashed += new_entry.size;
+                                this.index.insert(key, new_entry);
                             }
-                            this.stats.bytes_hashed += new_entry.size;
-                            this.index.insert(key, new_entry);
-                        }
-                        None => {
-                            this.index.remove(&key);
+                            None => {
+                                this.index.remove(&key);
+                            }
                         }
                     }
-                }
-                this.stats.files_indexed = this.index.len() as u64;
-                this.stats.last_change_at = Some(Instant::now());
-                this._debounce_task = None;
-                cx.emit(ContextIndexEvent::StatsUpdated);
-            });
+                    this.stats.files_indexed = this.index.len() as u64;
+                    this.stats.last_change_at = Some(Instant::now());
+                    log::info!(
+                        "[context_index] indexed {} files",
+                        this.stats.files_indexed
+                    );
+                    cx.emit(ContextIndexEvent::StatsUpdated);
+                });
+            }
         }));
     }
 }
