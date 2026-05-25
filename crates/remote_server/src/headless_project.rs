@@ -34,7 +34,7 @@ use rpc::{
 };
 use smol::process::Child;
 
-use settings::initial_server_settings_content;
+use settings::{Settings as _, initial_server_settings_content};
 use std::{
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -69,6 +69,7 @@ pub struct HeadlessProject {
     // Used mostly to keep alive the toolchain store for RPC handlers.
     // Local variant is used within LSP store, but that's a separate entity.
     pub _toolchain_store: Entity<ToolchainStore>,
+    pub context_index: Entity<context_index::ContextIndex>,
     pub kernels: HashMap<String, Child>,
 }
 
@@ -310,6 +311,9 @@ impl HeadlessProject {
         session.add_entity_request_handler(Self::handle_download_file_by_path);
 
         session.add_entity_message_handler(Self::handle_find_search_candidates_cancel);
+        session.add_entity_request_handler(Self::handle_get_context_index_stats);
+        session.add_entity_request_handler(Self::handle_reset_context_index);
+        session.add_entity_request_handler(Self::handle_set_context_index_enabled);
         session.add_entity_request_handler(BufferStore::handle_update_buffer);
         session.add_entity_message_handler(BufferStore::handle_close_buffer);
 
@@ -338,6 +342,19 @@ impl HeadlessProject {
         AgentServerStore::init_headless(&session);
         ContextServerStore::init_headless(&session);
 
+        let context_index = {
+            let enabled =
+                context_index::ContextIndexSettings::get_global(cx).enabled;
+            cx.new(|cx| {
+                context_index::ContextIndex::new(
+                    fs.clone(),
+                    worktree_store.clone(),
+                    enabled,
+                    cx,
+                )
+            })
+        };
+
         HeadlessProject {
             next_entry_id: Default::default(),
             session,
@@ -351,6 +368,7 @@ impl HeadlessProject {
             breakpoint_store,
             agent_server_store,
             context_server_store,
+            context_index,
             languages,
             extensions,
             git_store,
@@ -1316,6 +1334,33 @@ impl HeadlessProject {
             .into_iter()
             .collect();
         Ok(proto::DirectoryEnvironment { environment })
+    }
+
+    async fn handle_get_context_index_stats(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GetContextIndexStats>,
+        cx: AsyncApp,
+    ) -> Result<proto::ContextIndexStats> {
+        let context_index = cx.read_entity(&this, |this, _| this.context_index.clone());
+        context_index::proto_handlers::handle_get_stats(context_index, envelope, cx).await
+    }
+
+    async fn handle_reset_context_index(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::ResetContextIndex>,
+        cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let context_index = cx.read_entity(&this, |this, _| this.context_index.clone());
+        context_index::proto_handlers::handle_reset(context_index, envelope, cx).await
+    }
+
+    async fn handle_set_context_index_enabled(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::SetContextIndexEnabled>,
+        cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let context_index = cx.read_entity(&this, |this, _| this.context_index.clone());
+        context_index::proto_handlers::handle_set_enabled(context_index, envelope, cx).await
     }
 }
 

@@ -1,5 +1,6 @@
 mod audio_input_output_setup;
 mod audio_test_window;
+mod context_index_setup;
 mod edit_prediction_provider_setup;
 mod feature_flags;
 mod skills_setup;
@@ -9,6 +10,7 @@ pub(crate) use audio_input_output_setup::{
     render_input_audio_device_dropdown, render_output_audio_device_dropdown,
 };
 pub(crate) use audio_test_window::open_audio_test_window;
+pub(crate) use context_index_setup::render_context_index_setup_page;
 pub(crate) use edit_prediction_provider_setup::render_edit_prediction_setup_page;
 pub(crate) use feature_flags::render_feature_flags_page;
 pub(crate) use skills_setup::render_skills_setup_page;

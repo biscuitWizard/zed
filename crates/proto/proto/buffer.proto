@@ -337,3 +337,34 @@ message FindSearchCandidatesCancelled {
   uint64 project_id = 1;
   uint64 handle = 2;
 }
+
+// Context Index messages
+
+message GetContextIndexStats {
+  uint64 project_id = 1;
+}
+
+message ContextIndexStats {
+  uint64 files_indexed = 1;
+  uint64 bytes_hashed = 2;
+  uint64 last_scan_at_ms = 3;
+  uint64 last_change_at_ms = 4;
+  bool currently_scanning = 5;
+  uint64 scan_progress_done = 6;
+  uint64 scan_progress_total = 7;
+  bool enabled = 8;
+}
+
+message ResetContextIndex {
+  uint64 project_id = 1;
+}
+
+message SetContextIndexEnabled {
+  uint64 project_id = 1;
+  bool enabled = 2;
+}
+
+message ContextIndexProgressUpdate {
+  uint64 project_id = 1;
+  ContextIndexStats stats = 2;
+}

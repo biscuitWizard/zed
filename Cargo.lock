@@ -3594,6 +3594,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
 
 [[package]]
+name = "context_index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "credentials_provider",
+ "fs",
+ "gpui",
+ "language_model",
+ "log",
+ "project",
+ "proto",
+ "rpc",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "settings_content",
+ "sha2",
+ "util",
+ "worktree",
+ "zed_credentials_provider",
+ "zlog",
+]
+
+[[package]]
 name = "context_server"
 version = "0.1.0"
 dependencies = [
@@ -14673,6 +14699,7 @@ dependencies = [
  "client",
  "clock",
  "collections",
+ "context_index",
  "crash-handler",
  "crashes",
  "dap_adapters",
@@ -16238,6 +16265,7 @@ dependencies = [
  "audio",
  "codestral",
  "component",
+ "context_index",
  "copilot",
  "copilot_ui",
  "cpal",
@@ -16252,6 +16280,7 @@ dependencies = [
  "heck 0.5.0",
  "itertools 0.14.0",
  "language",
+ "language_model",
  "log",
  "menu",
  "paths",
@@ -22512,6 +22541,7 @@ dependencies = [
  "command_palette",
  "component",
  "component_preview",
+ "context_index",
  "copilot",
  "copilot_chat",
  "copilot_ui",

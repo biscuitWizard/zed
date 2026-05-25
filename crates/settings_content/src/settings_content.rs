@@ -1,5 +1,6 @@
 mod action;
 mod agent;
+mod context_index;
 mod editor;
 mod extension;
 mod fallible_options;
@@ -15,6 +16,7 @@ mod workspace;
 
 pub use action::{ActionName, ActionWithArguments};
 pub use agent::*;
+pub use context_index::*;
 pub use editor::*;
 pub use extension::*;
 pub use fallible_options::*;
@@ -145,6 +147,9 @@ pub struct SettingsContent {
 
     pub agent: Option<AgentSettingsContent>,
     pub agent_servers: Option<AllAgentServersSettings>,
+
+    /// Configuration for the project-wide context indexer (file hashing, embeddings).
+    pub context_index: Option<ContextIndexSettingsContent>,
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,

@@ -1242,6 +1242,26 @@
     // Default: true
     "show_merge_conflict_indicator": true,
   },
+  // Configuration for the project-wide context indexer.
+  "context_index": {
+    // Whether the context indexer is enabled.
+    "enabled": true,
+    // Embedding service configuration.
+    "embed": {
+      "api_url": "http://192.168.1.50:7997",
+      "model": "Qwen/Qwen3-Embedding-4B",
+    },
+    // Reranking service configuration.
+    "rerank": {
+      "api_url": "http://192.168.1.50:7997",
+      "model": "tomaarsen/Qwen3-Reranker-4B-seq-cls",
+    },
+    // HyDE (Hypothetical Document Embeddings) service configuration.
+    "hyde": {
+      "api_url": "http://192.168.1.50:8001/v1",
+      "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    },
+  },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,
   // Whether to use language servers to provide code intelligence.

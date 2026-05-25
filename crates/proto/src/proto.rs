@@ -376,6 +376,11 @@ messages!(
     (KillKernel, Background),
     (GetRemoteProfilingData, Background),
     (GetRemoteProfilingDataResponse, Background),
+    (GetContextIndexStats, Background),
+    (ContextIndexStats, Background),
+    (ResetContextIndex, Background),
+    (SetContextIndexEnabled, Background),
+    (ContextIndexProgressUpdate, Background),
 );
 
 request_messages!(
@@ -588,6 +593,9 @@ request_messages!(
     (SpawnKernel, SpawnKernelResponse),
     (KillKernel, Ack),
     (GetRemoteProfilingData, GetRemoteProfilingDataResponse),
+    (GetContextIndexStats, ContextIndexStats),
+    (ResetContextIndex, Ack),
+    (SetContextIndexEnabled, Ack),
 );
 
 lsp_messages!(
@@ -785,7 +793,11 @@ entity_messages!(
     FindSearchCandidatesChunk,
     FindSearchCandidatesCancelled,
     DownloadFileByPath,
-    GetRemoteProfilingData
+    GetRemoteProfilingData,
+    GetContextIndexStats,
+    ResetContextIndex,
+    SetContextIndexEnabled,
+    ContextIndexProgressUpdate
 );
 
 entity_messages!(

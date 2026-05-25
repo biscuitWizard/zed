@@ -484,7 +484,13 @@ message Envelope {
     SearchCommits search_commits = 449;
     SearchCommitsResponse search_commits_response = 450;
     GetInitialGraphData get_initial_graph_data = 451;
-    GetInitialGraphDataResponse get_initial_graph_data_response = 452; // current max
+    GetInitialGraphDataResponse get_initial_graph_data_response = 452;
+
+    GetContextIndexStats get_context_index_stats = 453;
+    ContextIndexStats context_index_stats = 454;
+    ResetContextIndex reset_context_index = 455;
+    SetContextIndexEnabled set_context_index_enabled = 456;
+    ContextIndexProgressUpdate context_index_progress_update = 457; // current max
   }
 
   reserved 87 to 88;

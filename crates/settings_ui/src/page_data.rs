@@ -13,7 +13,8 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{
-        open_audio_test_window, render_edit_prediction_setup_page, render_skills_setup_page,
+        open_audio_test_window, render_context_index_setup_page,
+        render_edit_prediction_setup_page, render_skills_setup_page,
         render_tool_permissions_setup_page,
     },
 };
@@ -7809,11 +7810,48 @@ fn ai_page(cx: &App) -> SettingsPage {
         items: concat_sections![
             general_section(),
             agent_configuration_section(cx),
+            context_index_section(),
             context_servers_section(),
             edit_prediction_language_settings_section(),
             edit_prediction_display_sub_section()
         ],
     }
+}
+
+fn context_index_section() -> [SettingsPageItem; 3] {
+    [
+        SettingsPageItem::SectionHeader("Context Indexer"),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Enable Context Indexer",
+            description: "When enabled, files in the project are hashed for incremental indexing.",
+            field: Box::new(SettingField {
+                json_path: Some("context_index.enabled"),
+                pick: |settings_content| {
+                    settings_content.context_index.as_ref()?.enabled.as_ref()
+                },
+                write: |settings_content, value, _| {
+                    settings_content
+                        .context_index
+                        .get_or_insert_default()
+                        .enabled = value;
+                },
+            }),
+            metadata: None,
+            files: USER,
+        }),
+        SettingsPageItem::SubPageLink(SubPageLink {
+            title: "Stats & Configuration".into(),
+            r#type: Default::default(),
+            json_path: Some("context_index"),
+            description: Some(
+                "View indexing stats and configure embedding, reranking, and HyDE service endpoints."
+                    .into(),
+            ),
+            in_json: true,
+            files: USER,
+            render: render_context_index_setup_page,
+        }),
+    ]
 }
 
 fn network_page() -> SettingsPage {
