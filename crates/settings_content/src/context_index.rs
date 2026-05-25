@@ -61,4 +61,39 @@ pub struct ContextIndexSettingsContent {
     ///
     /// Default: 2560
     pub embedding_dim: Option<u32>,
+
+    /// Dense vector candidates to retrieve before fusion.
+    ///
+    /// Default: 100
+    pub ann_top_k: Option<u32>,
+
+    /// BM25/FTS candidates to retrieve before fusion.
+    ///
+    /// Default: 100
+    pub bm25_top_k: Option<u32>,
+
+    /// Reciprocal-rank-fusion constant.
+    ///
+    /// Default: 60
+    pub rrf_k: Option<u32>,
+
+    /// Number of fused candidates requested from the reranker.
+    ///
+    /// Default: 10
+    pub rerank_top_k: Option<u32>,
+
+    /// Number of final results rendered in the UI.
+    ///
+    /// Default: 5
+    pub result_top_k: Option<u32>,
+
+    /// Instruction prepended to user queries for Qwen3 embedding.
+    ///
+    /// Default: "Given a code search query, retrieve relevant source code that satisfies the query."
+    pub query_instruction: Option<String>,
+
+    /// Low-confidence threshold for rerank scores.
+    ///
+    /// Default: 0.3
+    pub confidence_threshold: Option<f32>,
 }

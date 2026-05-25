@@ -4,11 +4,17 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context as _, Result};
 use arrow_array::{
-    Array, FixedSizeListArray, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    Array, FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array, ListArray,
+    RecordBatch, StringArray,
 };
 use arrow_schema::Schema;
+use collections::HashMap;
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
+use lancedb::index::{
+    Index,
+    scalar::{FtsIndexBuilder, FullTextSearchQuery},
+};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::Table;
 use tokio::runtime::Runtime;
@@ -23,11 +29,55 @@ pub struct LanceStoreStats {
     pub files: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub id: String,
+    pub node_id: String,
+    pub view: String,
+    pub parent_id: Option<String>,
+    pub file_path: String,
+    pub language_id: String,
+    pub kind: String,
+    pub name: Option<String>,
+    pub byte_start: i64,
+    pub byte_end: i64,
+    pub line_start: i32,
+    pub line_end: i32,
+    pub imports: String,
+    pub signature: String,
+    pub breadcrumb: String,
+    pub code_text: String,
+    pub doc_text: String,
+    pub referenced_symbols: Vec<String>,
+    pub score: f32,
+}
+
 pub struct LanceStore {
     db: Connection,
     table: Table,
     embedding_dim: usize,
 }
+
+const ROW_COLUMNS: &[&str] = &[
+    "id",
+    "node_id",
+    "view",
+    "parent_id",
+    "file_path",
+    "language_id",
+    "kind",
+    "name",
+    "byte_start",
+    "byte_end",
+    "line_start",
+    "line_end",
+    "imports",
+    "signature",
+    "breadcrumb",
+    "code_text",
+    "doc_text",
+    "referenced_symbols",
+];
 
 static LANCE_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -205,6 +255,161 @@ impl LanceStore {
         .await
     }
 
+    pub async fn ensure_fts_index(&self) -> Result<()> {
+        let table = self.table.clone();
+        run_on_lance_runtime(async move {
+            let result = table
+                .create_index(&["fts_text"], Index::FTS(FtsIndexBuilder::default()))
+                .execute()
+                .await;
+            if let Err(err) = result {
+                let message = err.to_string();
+                if !message.to_lowercase().contains("already") {
+                    return Err(err).context("creating fts_text index");
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn vector_search(
+        &self,
+        vector: &[f32],
+        k: usize,
+        view_filter: Option<&str>,
+    ) -> Result<Vec<ChunkRow>> {
+        let table = self.table.clone();
+        let vector = vector.to_vec();
+        let view_filter = view_filter.map(ToOwned::to_owned);
+        run_on_lance_runtime(async move {
+            let mut query = table
+                .query()
+                .nearest_to(vector)
+                .context("building vector search query")?
+                .select(Select::columns(ROW_COLUMNS))
+                .limit(k);
+            if let Some(view) = view_filter {
+                query = query.only_if(format!("view = {}", sql_quote(&view)));
+            }
+            let stream = query.execute().await.context("executing vector search")?;
+            collect_chunk_rows(stream).await
+        })
+        .await
+    }
+
+    pub async fn fts_search(
+        &self,
+        query_text: &str,
+        k: usize,
+        view_filter: Option<&str>,
+    ) -> Result<Vec<ChunkRow>> {
+        let table = self.table.clone();
+        let query_text = query_text.to_string();
+        let view_filter = view_filter.map(ToOwned::to_owned);
+        run_on_lance_runtime(async move {
+            let mut query = table
+                .query()
+                .full_text_search(FullTextSearchQuery::new(query_text))
+                .select(Select::columns(ROW_COLUMNS))
+                .limit(k);
+            if let Some(view) = view_filter {
+                query = query.only_if(format!("view = {}", sql_quote(&view)));
+            }
+            let stream = query.execute().await.context("executing fts search")?;
+            collect_chunk_rows(stream).await
+        })
+        .await
+    }
+
+    pub async fn get_canonical_by_node_ids(
+        &self,
+        node_ids: &[String],
+    ) -> Result<HashMap<String, ChunkRow>> {
+        if node_ids.is_empty() {
+            return Ok(HashMap::default());
+        }
+        let table = self.table.clone();
+        let node_ids = node_ids.to_vec();
+        run_on_lance_runtime(async move {
+            let filter = format!(
+                "view = 'code' AND node_id IN ({})",
+                node_ids
+                    .iter()
+                    .map(|id| sql_quote(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let stream = table
+                .query()
+                .select(Select::columns(ROW_COLUMNS))
+                .only_if(filter)
+                .limit(node_ids.len())
+                .execute()
+                .await
+                .context("querying canonical chunk rows")?;
+            let rows = collect_chunk_rows(stream).await?;
+            Ok(rows
+                .into_iter()
+                .map(|row| (row.node_id.clone(), row))
+                .collect())
+        })
+        .await
+    }
+
+    pub async fn parent_chain(&self, chunk: &ChunkRow) -> Result<Vec<ChunkRow>> {
+        let table = self.table.clone();
+        let mut parent_id = chunk.parent_id.clone();
+        run_on_lance_runtime(async move {
+            let mut ancestors = Vec::new();
+            while let Some(id) = parent_id {
+                let stream = table
+                    .query()
+                    .select(Select::columns(ROW_COLUMNS))
+                    .only_if(format!("id = {}", sql_quote(&id)))
+                    .limit(1)
+                    .execute()
+                    .await
+                    .context("querying parent chunk row")?;
+                let mut rows = collect_chunk_rows(stream).await?;
+                let Some(parent) = rows.pop() else {
+                    break;
+                };
+                parent_id = parent.parent_id.clone();
+                ancestors.push(parent);
+            }
+            ancestors.reverse();
+            Ok(ancestors)
+        })
+        .await
+    }
+
+    pub async fn siblings_of(&self, chunk: &ChunkRow) -> Result<Vec<ChunkRow>> {
+        let Some(parent_id) = chunk.parent_id.clone() else {
+            return Ok(Vec::new());
+        };
+        let table = self.table.clone();
+        let chunk_id = chunk.id.clone();
+        run_on_lance_runtime(async move {
+            let filter = format!(
+                "view = 'code' AND parent_id = {} AND id != {}",
+                sql_quote(&parent_id),
+                sql_quote(&chunk_id)
+            );
+            let stream = table
+                .query()
+                .select(Select::columns(ROW_COLUMNS))
+                .only_if(filter)
+                .execute()
+                .await
+                .context("querying sibling chunk rows")?;
+            let mut rows = collect_chunk_rows(stream).await?;
+            rows.sort_by_key(|row| row.line_start);
+            Ok(rows)
+        })
+        .await
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
@@ -270,6 +475,142 @@ async fn delete_by_ids(table: &Table, chunks: &[Chunk]) -> Result<()> {
     // Missing ids mean the row set was already invalidated by another path.
     let _ = table.delete(&format!("id IN ({in_clause})")).await;
     Ok(())
+}
+
+async fn collect_chunk_rows<S>(mut stream: S) -> Result<Vec<ChunkRow>>
+where
+    S: futures::TryStream<Ok = RecordBatch> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let mut rows = Vec::new();
+    while let Some(batch) = stream.try_next().await.context("reading chunk rows")? {
+        rows.extend(chunk_rows_from_batch(&batch)?);
+    }
+    Ok(rows)
+}
+
+fn chunk_rows_from_batch(batch: &RecordBatch) -> Result<Vec<ChunkRow>> {
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        rows.push(ChunkRow {
+            id: string_value(batch, "id", row)?,
+            node_id: string_value(batch, "node_id", row)?,
+            view: string_value(batch, "view", row)?,
+            parent_id: optional_string_value(batch, "parent_id", row)?,
+            file_path: string_value(batch, "file_path", row)?,
+            language_id: string_value(batch, "language_id", row)?,
+            kind: string_value(batch, "kind", row)?,
+            name: optional_string_value(batch, "name", row)?,
+            byte_start: i64_value(batch, "byte_start", row)?,
+            byte_end: i64_value(batch, "byte_end", row)?,
+            line_start: i32_value(batch, "line_start", row)?,
+            line_end: i32_value(batch, "line_end", row)?,
+            imports: string_value(batch, "imports", row)?,
+            signature: string_value(batch, "signature", row)?,
+            breadcrumb: string_value(batch, "breadcrumb", row)?,
+            code_text: string_value(batch, "code_text", row)?,
+            doc_text: string_value(batch, "doc_text", row)?,
+            referenced_symbols: list_string_value(batch, "referenced_symbols", row)?,
+            score: score_value(batch, row),
+        });
+    }
+    Ok(rows)
+}
+
+fn string_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("missing {name} column"))?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .with_context(|| format!("{name} column should be Utf8"))
+}
+
+fn string_value(batch: &RecordBatch, name: &str, row: usize) -> Result<String> {
+    let array = string_array(batch, name)?;
+    if array.is_null(row) {
+        Ok(String::new())
+    } else {
+        Ok(array.value(row).to_string())
+    }
+}
+
+fn optional_string_value(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<String>> {
+    let array = string_array(batch, name)?;
+    if array.is_null(row) {
+        Ok(None)
+    } else {
+        Ok(Some(array.value(row).to_string()))
+    }
+}
+
+fn i64_value(batch: &RecordBatch, name: &str, row: usize) -> Result<i64> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("missing {name} column"))?
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .with_context(|| format!("{name} column should be Int64"))
+        .map(|array| array.value(row))
+}
+
+fn i32_value(batch: &RecordBatch, name: &str, row: usize) -> Result<i32> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("missing {name} column"))?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .with_context(|| format!("{name} column should be Int32"))
+        .map(|array| array.value(row))
+}
+
+fn list_string_value(batch: &RecordBatch, name: &str, row: usize) -> Result<Vec<String>> {
+    let array = batch
+        .column_by_name(name)
+        .with_context(|| format!("missing {name} column"))?
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .with_context(|| format!("{name} column should be List<Utf8>"))?;
+
+    if array.is_null(row) {
+        return Ok(Vec::new());
+    }
+
+    let values = array.value(row);
+    let values = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("referenced_symbols values should be Utf8")?;
+    let mut out = Vec::new();
+    for i in 0..values.len() {
+        if !values.is_null(i) {
+            out.push(values.value(i).to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn score_value(batch: &RecordBatch, row: usize) -> f32 {
+    for name in ["_distance", "_score"] {
+        let Some(column) = batch.column_by_name(name) else {
+            continue;
+        };
+        if let Some(array) = column.as_any().downcast_ref::<Float32Array>() {
+            if !array.is_null(row) {
+                return array.value(row);
+            }
+        }
+        if let Some(array) = column.as_any().downcast_ref::<Float64Array>() {
+            if !array.is_null(row) {
+                return array.value(row) as f32;
+            }
+        }
+    }
+    0.0
+}
+
+fn sql_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Build the text body used by the future full-text search index.

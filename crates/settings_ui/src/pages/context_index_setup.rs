@@ -130,6 +130,7 @@ pub(crate) fn render_context_index_setup_page(
             window,
             cx,
         ))
+        .child(render_retrieval_section(settings_window, window, cx))
         .child(render_provider_section(
             "HyDE",
             "Hypothetical Document Embeddings for improved retrieval.",
@@ -140,6 +141,32 @@ pub(crate) fn render_context_index_setup_page(
             window,
             cx,
         ))
+        .into_any_element()
+}
+
+fn render_retrieval_section(
+    settings_window: &SettingsWindow,
+    window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
+    v_flex()
+        .id("Context Index Retrieval")
+        .min_w_0()
+        .pt_8()
+        .gap_1p5()
+        .child(SettingsSectionHeader::new("Retrieval").no_padding(true))
+        .child(
+            div().mt_4().child(
+                settings_window
+                    .render_sub_page_items_section(
+                        retrieval_settings().iter().enumerate(),
+                        true,
+                        window,
+                        cx,
+                    )
+                    .into_any_element(),
+            ),
+        )
         .into_any_element()
 }
 
@@ -270,12 +297,7 @@ fn render_provider_section(
 
     _ = window.use_keyed_state(current_url(cx), cx, |_, cx| {
         let task = api_key_state.update(cx, |key_state, cx| {
-            key_state.load_if_needed(
-                current_url(cx),
-                |state| state,
-                creds_provider.clone(),
-                cx,
-            )
+            key_state.load_if_needed(current_url(cx), |state| state, creds_provider.clone(), cx)
         });
         cx.spawn(async move |_, cx| {
             task.await.ok();
@@ -410,7 +432,7 @@ fn embed_settings() -> Box<[SettingsPageItem]> {
                 json_path: Some("context_index.embed.api_url"),
             }),
             metadata: Some(Box::new(SettingsFieldMetadata {
-                placeholder: Some("http://localhost:7997"),
+                placeholder: Some("http://192.168.1.50:7997"),
                 ..Default::default()
             })),
             files: USER,
@@ -473,7 +495,7 @@ fn rerank_settings() -> Box<[SettingsPageItem]> {
                 json_path: Some("context_index.rerank.api_url"),
             }),
             metadata: Some(Box::new(SettingsFieldMetadata {
-                placeholder: Some("http://localhost:7997"),
+                placeholder: Some("http://192.168.1.50:7997"),
                 ..Default::default()
             })),
             files: USER,
@@ -502,7 +524,138 @@ fn rerank_settings() -> Box<[SettingsPageItem]> {
                 json_path: Some("context_index.rerank.model"),
             }),
             metadata: Some(Box::new(SettingsFieldMetadata {
-                placeholder: Some("BAAI/bge-reranker-v2-m3"),
+                placeholder: Some("tomaarsen/Qwen3-Reranker-4B-seq-cls"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+    ])
+}
+
+fn retrieval_settings() -> Box<[SettingsPageItem]> {
+    Box::new([
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "ANN Top K",
+            description: "Dense vector candidates to retrieve before fusion.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.ann_top_k.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings.context_index.get_or_insert_default().ann_top_k = value;
+                },
+                json_path: Some("context_index.ann_top_k"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("100"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "BM25 Top K",
+            description: "Keyword candidates to retrieve from LanceDB FTS before fusion.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.bm25_top_k.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings.context_index.get_or_insert_default().bm25_top_k = value;
+                },
+                json_path: Some("context_index.bm25_top_k"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("100"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "RRF K",
+            description: "Reciprocal-rank-fusion constant.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.rrf_k.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings.context_index.get_or_insert_default().rrf_k = value;
+                },
+                json_path: Some("context_index.rrf_k"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("60"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Rerank Top K",
+            description: "Number of fused candidates returned by the reranker.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.rerank_top_k.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings.context_index.get_or_insert_default().rerank_top_k = value;
+                },
+                json_path: Some("context_index.rerank_top_k"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("10"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Result Top K",
+            description: "Number of final results rendered in the context search buffer.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.result_top_k.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings.context_index.get_or_insert_default().result_top_k = value;
+                },
+                json_path: Some("context_index.result_top_k"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("5"),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Query Instruction",
+            description: "Instruction prepended to user queries before embedding.",
+            field: Box::new(SettingField {
+                pick: |settings| settings.context_index.as_ref()?.query_instruction.as_ref(),
+                write: |settings, value, _app: &App| {
+                    settings
+                        .context_index
+                        .get_or_insert_default()
+                        .query_instruction = value;
+                },
+                json_path: Some("context_index.query_instruction"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some(
+                    "Given a code search query, retrieve relevant source code that satisfies the query.",
+                ),
+                ..Default::default()
+            })),
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Confidence Threshold",
+            description: "Low-confidence threshold for top rerank scores.",
+            field: Box::new(SettingField {
+                pick: |settings| {
+                    settings
+                        .context_index
+                        .as_ref()?
+                        .confidence_threshold
+                        .as_ref()
+                },
+                write: |settings, value, _app: &App| {
+                    settings
+                        .context_index
+                        .get_or_insert_default()
+                        .confidence_threshold = value;
+                },
+                json_path: Some("context_index.confidence_threshold"),
+            }),
+            metadata: Some(Box::new(SettingsFieldMetadata {
+                placeholder: Some("0.3"),
                 ..Default::default()
             })),
             files: USER,

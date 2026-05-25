@@ -4,9 +4,6 @@ pub mod adapter;
 pub mod adapters;
 pub mod ast;
 pub mod budget;
-#[cfg(feature = "dump_chunks")]
-// TODO: disable once embeddings are integrated (chunker::dump).
-pub mod dump;
 pub mod ids;
 pub mod markdown;
 pub mod text;

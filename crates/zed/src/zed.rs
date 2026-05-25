@@ -1,5 +1,6 @@
 mod app_menus;
 mod context_index_indicator;
+mod context_index_search;
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -155,6 +156,8 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    context_index_search::init(cx);
+
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());
     #[cfg(target_os = "macos")]

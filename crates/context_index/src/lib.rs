@@ -1,8 +1,11 @@
 pub mod api_keys;
 pub mod chunker;
+pub mod embed;
+pub mod expansion;
 pub mod hasher;
 pub mod index;
 pub mod proto_handlers;
+pub mod retrieve;
 pub mod settings;
 pub mod stats;
 pub mod store;
@@ -13,6 +16,7 @@ use gpui::{App, AppContext as _, Entity, EntityId, Global};
 use project::Project;
 
 pub use index::{ContextIndex, ContextIndexEvent};
+pub use retrieve::{RetrievalToggles, SearchResult, search};
 pub use settings::ContextIndexSettings;
 pub use stats::ContextIndexStats;
 
@@ -38,9 +42,11 @@ pub fn init(cx: &mut App) {
     cx.observe_new::<Project>(|project, _window, cx| {
         let enabled = ContextIndexSettings::get_global(cx).enabled;
         let fs = project.fs().clone();
+        let http_client = cx.http_client();
         let worktree_store = project.worktree_store();
         let project_entity_id = cx.entity_id();
-        let context_index = cx.new(|cx| ContextIndex::new(fs, worktree_store, enabled, cx));
+        let context_index =
+            cx.new(|cx| ContextIndex::new(fs, http_client, worktree_store, enabled, cx));
 
         cx.global_mut::<ContextIndexRegistry>()
             .indices

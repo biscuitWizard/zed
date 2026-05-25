@@ -1,3 +1,5 @@
+use crate::store::ChunkRow;
+
 use tree_sitter::Node;
 
 pub trait LanguageAdapter: Send + Sync {
@@ -14,6 +16,73 @@ pub trait LanguageAdapter: Send + Sync {
     fn referenced_symbols(&self, _node: Node<'_>, _source: &[u8]) -> Vec<String> {
         Vec::new()
     }
+
+    fn render_skeleton(
+        &self,
+        ancestors: &[ChunkRow],
+        matched: &ChunkRow,
+        siblings: &[ChunkRow],
+    ) -> String {
+        render_default_skeleton(ancestors, matched, siblings)
+    }
+}
+
+pub fn render_default_skeleton(
+    ancestors: &[ChunkRow],
+    matched: &ChunkRow,
+    siblings: &[ChunkRow],
+) -> String {
+    let mut lines = vec![format!("// {}", matched.file_path)];
+    if !matched.imports.trim().is_empty() {
+        lines.push(matched.imports.clone());
+        lines.push(String::new());
+    }
+
+    let mut indent = String::new();
+    for ancestor in ancestors {
+        if ancestor.kind == "file" {
+            continue;
+        }
+        let signature = if ancestor.signature.trim().is_empty() {
+            ancestor
+                .name
+                .as_deref()
+                .unwrap_or(ancestor.kind.as_str())
+                .to_string()
+        } else {
+            ancestor.signature.clone()
+        };
+        lines.push(format!("{indent}{signature}"));
+        lines.push(format!("{indent}{{"));
+        indent.push_str("    ");
+    }
+
+    if !siblings.is_empty() {
+        lines.push(format!(
+            "{indent}// {} sibling member(s) elided",
+            siblings.len()
+        ));
+    }
+    lines.push(format!("{indent}// <<< MATCHED CHUNK >>>"));
+    for body_line in matched.code_text.lines() {
+        if body_line.starts_with(&indent) {
+            lines.push(body_line.to_string());
+        } else {
+            lines.push(format!("{indent}{body_line}"));
+        }
+    }
+
+    for ancestor in ancestors.iter().rev() {
+        if ancestor.kind == "file" {
+            continue;
+        }
+        indent.truncate(indent.len().saturating_sub(4));
+        lines.push(format!("{indent}}}"));
+    }
+
+    let mut skeleton = lines.join("\n");
+    skeleton.push('\n');
+    skeleton
 }
 
 pub fn node_text(node: Node<'_>, source: &[u8]) -> String {

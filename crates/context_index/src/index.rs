@@ -6,14 +6,16 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use gpui::{Context, Entity, EventEmitter, Subscription, Task};
+use http_client::HttpClient;
 use project::worktree_store::{WorktreeStore, WorktreeStoreEvent};
 use settings::{Settings as _, SettingsStore};
-#[cfg(not(feature = "dump_chunks"))]
 use sha2::{Digest, Sha256};
 use worktree::{PathChange, Snapshot, WorktreeId};
 
 use crate::{
+    api_keys::{embed_api_key_state, embed_api_url},
     chunker::{self, ChunkBudget},
+    embed::EmbedClient,
     hasher::{self, FileHash},
     settings::ContextIndexSettings,
     stats::ContextIndexStats,
@@ -46,7 +48,6 @@ struct PendingChunk {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "dump_chunks", allow(dead_code))]
 enum ChunkInvalidationReason {
     FullRefresh,
     Removed,
@@ -55,7 +56,6 @@ enum ChunkInvalidationReason {
 }
 
 impl ChunkInvalidationReason {
-    #[cfg(not(feature = "dump_chunks"))]
     fn as_str(&self) -> &'static str {
         match self {
             Self::FullRefresh => "full refresh",
@@ -67,7 +67,6 @@ impl ChunkInvalidationReason {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "dump_chunks", allow(dead_code))]
 enum ChunkInvalidation {
     /// Clear every chunk row before replaying a full project snapshot.
     All { reason: ChunkInvalidationReason },
@@ -80,6 +79,7 @@ enum ChunkInvalidation {
 
 pub struct ContextIndex {
     fs: Arc<dyn fs::Fs>,
+    http_client: Arc<dyn HttpClient>,
     worktree_store: Entity<WorktreeStore>,
     index: HashMap<(WorktreeId, Arc<str>), FileEntry>,
     stats: ContextIndexStats,
@@ -109,6 +109,7 @@ pub struct ContextIndex {
 impl ContextIndex {
     pub fn new(
         fs: Arc<dyn fs::Fs>,
+        http_client: Arc<dyn HttpClient>,
         worktree_store: Entity<WorktreeStore>,
         enabled: bool,
         cx: &mut Context<Self>,
@@ -122,6 +123,7 @@ impl ContextIndex {
 
         let mut this = Self {
             fs,
+            http_client,
             worktree_store,
             index: HashMap::default(),
             stats: ContextIndexStats {
@@ -277,7 +279,6 @@ impl ContextIndex {
     }
 
     /// Compute the data directory for this project's LanceDB store.
-    #[cfg(not(feature = "dump_chunks"))]
     fn ensure_store_dir(&mut self, cx: &Context<Self>) -> Option<PathBuf> {
         if let Some(dir) = &self.store_dir {
             return Some(dir.clone());
@@ -637,41 +638,44 @@ impl ContextIndex {
     /// Drains invalidations before writes so stale rows are removed even when
     /// the refreshed file no longer produces chunks.
     fn schedule_chunk_processing(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "dump_chunks")]
-        {
-            self.schedule_chunk_dump_processing(cx);
+        if self.chunk_running {
             return;
         }
 
-        #[cfg(not(feature = "dump_chunks"))]
-        {
-            if self.chunk_running {
+        let store_dir = match self.ensure_store_dir(cx) {
+            Some(d) => d,
+            None => {
+                log::warn!("[context_index] cannot determine store dir, skipping chunk processing");
                 return;
             }
+        };
 
-            let store_dir = match self.ensure_store_dir(cx) {
-                Some(d) => d,
-                None => {
-                    log::warn!(
-                        "[context_index] cannot determine store dir, skipping chunk processing"
-                    );
-                    return;
-                }
-            };
+        self.chunk_running = true;
+        let fs = self.fs.clone();
+        let http_client = self.http_client.clone();
+        let store = self.store.clone();
+        let settings = ContextIndexSettings::get_global(cx).clone();
+        let embed_api_url = embed_api_url(cx).to_string();
+        let embed_api_key = embed_api_key_state(cx)
+            .read(cx)
+            .key(&embed_api_url)
+            .map(|key| key.to_string());
+        let embedding_dim = settings.embedding_dim as usize;
+        let embed_client = EmbedClient::new(
+            http_client,
+            embed_api_url,
+            settings.embed_model.clone(),
+            settings.query_instruction.clone(),
+            embed_api_key,
+        );
+        let budget = ChunkBudget::from_token_counts_with_doc_view_min(
+            settings.chunk_target_tokens,
+            settings.chunk_max_tokens,
+            settings.chunk_min_tokens,
+            settings.chunk_doc_view_min_tokens,
+        );
 
-            self.chunk_running = true;
-            let fs = self.fs.clone();
-            let store = self.store.clone();
-            let settings = ContextIndexSettings::get_global(cx);
-            let embedding_dim = settings.embedding_dim as usize;
-            let budget = ChunkBudget::from_token_counts_with_doc_view_min(
-                settings.chunk_target_tokens,
-                settings.chunk_max_tokens,
-                settings.chunk_min_tokens,
-                settings.chunk_doc_view_min_tokens,
-            );
-
-            self._chunk_task = Some(cx.spawn(async move |this, cx| {
+        self._chunk_task = Some(cx.spawn(async move |this, cx| {
             let store = match store {
                 Some(s) => s,
                 None => match open_store_safe(&store_dir, embedding_dim).await {
@@ -766,6 +770,7 @@ impl ContextIndex {
                 }
 
                 let mut total_new_chunks = 0u64;
+                let mut ensured_fts = false;
                 let mut refreshed_files = HashSet::default();
 
                 for pending in &chunks_to_process {
@@ -788,12 +793,6 @@ impl ContextIndex {
                     };
 
                     let chunks = chunker.chunk_file(rel, &bytes);
-
-                    #[cfg(feature = "dump_chunks")]
-                    {
-                        // TODO: disable once embeddings are integrated (chunker::dump).
-                        chunker::dump::log_chunks(rel, &chunks);
-                    }
 
                     match store.delete_by_file_paths(&[rel]).await {
                         Ok(deleted) => {
@@ -818,8 +817,28 @@ impl ContextIndex {
                         continue;
                     }
 
-                    match store.upsert_chunks(&chunks).await {
+                    let embed_texts = chunks
+                        .iter()
+                        .map(|chunk| chunk.embed_text.clone())
+                        .collect::<Vec<_>>();
+                    let upsert_result = match embed_client.embed_documents(&embed_texts).await {
+                        Ok(vectors) => store.upsert_chunks_with_vectors(&chunks, &vectors).await,
+                        Err(err) => {
+                            log::warn!(
+                                "[context_index] failed to embed chunks for {rel}, storing without vectors: {err}"
+                            );
+                            store.upsert_chunks(&chunks).await
+                        }
+                    };
+
+                    match upsert_result {
                         Ok(()) => {
+                            if !ensured_fts {
+                                if let Err(err) = store.ensure_fts_index().await {
+                                    log::warn!("[context_index] failed to ensure FTS index: {err}");
+                                }
+                                ensured_fts = true;
+                            }
                             total_new_chunks += chunks.len() as u64;
                             refreshed_files.insert(rel.to_string());
                             if refreshed_files.len() <= 50 || refreshed_files.len() % 200 == 0 {
@@ -869,104 +888,6 @@ impl ContextIndex {
                 }
             }
         }));
-        }
-    }
-
-    #[cfg(feature = "dump_chunks")]
-    fn schedule_chunk_dump_processing(&mut self, cx: &mut Context<Self>) {
-        if self.chunk_running {
-            return;
-        }
-
-        self.chunk_running = true;
-        let fs = self.fs.clone();
-        let settings = ContextIndexSettings::get_global(cx);
-        let budget = ChunkBudget::from_token_counts_with_doc_view_min(
-            settings.chunk_target_tokens,
-            settings.chunk_max_tokens,
-            settings.chunk_min_tokens,
-            settings.chunk_doc_view_min_tokens,
-        );
-
-        self._chunk_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let (chunks_to_process, invalidations) = this
-                    .update(cx, |this, _cx| {
-                        (
-                            std::mem::take(&mut this.pending_chunks),
-                            std::mem::take(&mut this.pending_chunk_invalidations),
-                        )
-                    })
-                    .unwrap_or_default();
-
-                if chunks_to_process.is_empty() && invalidations.is_empty() {
-                    let _ = this.update(cx, |this, _cx| {
-                        this.chunk_running = false;
-                        this._chunk_task = None;
-                    });
-                    return;
-                }
-
-                let mut invalidated_all = false;
-                let mut invalidated_files = HashSet::default();
-                for invalidation in invalidations {
-                    match invalidation {
-                        ChunkInvalidation::All { .. } => {
-                            invalidated_all = true;
-                        }
-                        ChunkInvalidation::File { rel_path, .. } => {
-                            invalidated_files.insert(rel_path);
-                        }
-                    }
-                }
-
-                let mut dumped_chunks = 0u64;
-                let mut refreshed_files = HashSet::default();
-
-                for pending in &chunks_to_process {
-                    let Some(chunker) = chunker::chunker_for_extension(&pending.extension, budget)
-                    else {
-                        continue;
-                    };
-
-                    let rel = pending.rel_path.as_ref();
-                    let bytes = match fs.load_bytes(&pending.abs_path).await {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            log::warn!(
-                                "[context_index] failed to read {} for chunk dumping: {e}",
-                                pending.rel_path
-                            );
-                            continue;
-                        }
-                    };
-
-                    let chunks = chunker.chunk_file(rel, &bytes);
-                    // TODO: disable once embeddings are integrated (chunker::dump).
-                    chunker::dump::log_chunks(rel, &chunks);
-
-                    if !chunks.is_empty() {
-                        dumped_chunks += chunks.len() as u64;
-                        refreshed_files.insert(rel.to_string());
-                    }
-                }
-
-                let _ = this.update(cx, |this, cx| {
-                    if invalidated_all {
-                        this.chunked_files.clear();
-                    }
-                    for rel_path in invalidated_files {
-                        this.chunked_files.remove(&rel_path);
-                    }
-                    for rel_path in refreshed_files {
-                        this.chunked_files.insert(rel_path);
-                    }
-                    this.stats.chunks_indexed = dumped_chunks;
-                    this.stats.files_chunked = this.chunked_files.len() as u64;
-                    cx.emit(ContextIndexEvent::StatsUpdated);
-                });
-            }
-        }));
     }
 }
 
@@ -977,7 +898,6 @@ fn extension_from_path(path: &Path) -> Option<String> {
 }
 
 /// Open the LanceDB store on its dedicated Tokio runtime.
-#[cfg(not(feature = "dump_chunks"))]
 async fn open_store_safe(store_dir: &Path, embedding_dim: usize) -> Option<LanceStore> {
     match LanceStore::open(store_dir, embedding_dim).await {
         Ok(store) => Some(store),

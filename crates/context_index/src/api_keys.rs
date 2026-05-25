@@ -11,8 +11,8 @@ static RERANK_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> =
     env_var!("CONTEXT_INDEX_RERANK_API_KEY");
 static HYDE_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> = env_var!("CONTEXT_INDEX_HYDE_API_KEY");
 
-const DEFAULT_EMBED_URL: &str = "http://localhost:7997";
-const DEFAULT_RERANK_URL: &str = "http://localhost:7997";
+const DEFAULT_EMBED_URL: &str = "http://192.168.1.50:7997";
+const DEFAULT_RERANK_URL: &str = "http://192.168.1.50:7997";
 const DEFAULT_HYDE_URL: &str = "http://localhost:7997";
 
 struct GlobalEmbedApiKey(Entity<ApiKeyState>);

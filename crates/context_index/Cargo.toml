@@ -11,10 +11,6 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-[features]
-default = ["dump_chunks"]
-dump_chunks = []
-
 [dependencies]
 anyhow.workspace = true
 arrow = { workspace = true }
@@ -25,6 +21,7 @@ credentials_provider.workspace = true
 fs.workspace = true
 futures.workspace = true
 gpui.workspace = true
+http_client.workspace = true
 lancedb = { workspace = true }
 language_model.workspace = true
 log.workspace = true
@@ -34,10 +31,11 @@ proto.workspace = true
 rpc.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 settings_content.workspace = true
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 tree-sitter = { workspace = true }
 tree-sitter-c-sharp = { workspace = true }
 tree-sitter-go = { workspace = true }
