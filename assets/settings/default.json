@@ -1268,6 +1268,8 @@
     "chunk_max_tokens": 3000,
     // Minimum chunk size in tokens. Chunks below this are dropped.
     "chunk_min_tokens": 64,
+    // Minimum doc-comment size in tokens before emitting a doc-view row.
+    "chunk_doc_view_min_tokens": 20,
     // Embedding vector dimensionality. Locked at table creation;
     // changing after indexing requires a reset.
     "embedding_dim": 2560,

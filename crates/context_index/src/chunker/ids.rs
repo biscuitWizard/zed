@@ -14,7 +14,13 @@ fn hex_sha256(input: &str) -> String {
 
 /// Deterministic chunk id: `sha256("{path}|{byte_start}|{byte_end}|{view}")`.
 pub fn chunk_id(path: &str, byte_start: i64, byte_end: i64, view: ChunkView) -> String {
-    hex_sha256(&format!("{}|{}|{}|{}", path, byte_start, byte_end, view.as_str()))
+    hex_sha256(&format!(
+        "{}|{}|{}|{}",
+        path,
+        byte_start,
+        byte_end,
+        view.as_str()
+    ))
 }
 
 /// Deterministic node id shared between CODE and DOC views:

@@ -1,4 +1,12 @@
+use std::sync::Arc;
+
+pub mod adapter;
+pub mod adapters;
+pub mod ast;
 pub mod budget;
+#[cfg(feature = "dump_chunks")]
+// TODO: disable once embeddings are integrated (chunker::dump).
+pub mod dump;
 pub mod ids;
 pub mod markdown;
 pub mod text;
@@ -34,12 +42,51 @@ pub fn chunker_for_extension(ext: &str, budget: ChunkBudget) -> Option<Box<dyn F
     let language_id = language_id_for_extension(ext)?;
 
     match ext {
+        "py" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::python::PythonAdapter),
+        ))),
+        "rs" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::rust::RustAdapter),
+        ))),
+        "cs" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::csharp::CSharpAdapter),
+        ))),
+        "go" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::go::GoAdapter),
+        ))),
+        "js" | "mjs" | "cjs" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::javascript::JavaScriptAdapter),
+        ))),
+        "ts" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::typescript::TypeScriptAdapter::new(
+                adapters::typescript::TypeScriptVariant::TypeScript,
+                language_id,
+            )),
+        ))),
+        "tsx" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::typescript::TypeScriptAdapter::new(
+                adapters::typescript::TypeScriptVariant::Tsx,
+                language_id,
+            )),
+        ))),
+        "jsx" => Some(Box::new(ast::AstChunker::new(
+            budget,
+            Arc::new(adapters::javascript::JavaScriptAdapter),
+        ))),
         "md" | "markdown" => Some(Box::new(markdown::MarkdownChunker::new(budget))),
-        _ => Some(Box::new(text::TextChunker {
+        "txt" => Some(Box::new(text::TextChunker {
             budget,
             language_id,
             doc_mode: false,
         })),
+        _ => None,
     }
 }
 
@@ -51,8 +98,7 @@ mod tests {
     fn supported_extensions() {
         let budget = ChunkBudget::default();
         for ext in &[
-            "py", "rs", "cs", "go", "js", "mjs", "cjs", "ts", "tsx", "jsx", "md", "markdown",
-            "txt",
+            "py", "rs", "cs", "go", "js", "mjs", "cjs", "ts", "tsx", "jsx", "md", "markdown", "txt",
         ] {
             assert!(
                 chunker_for_extension(ext, budget).is_some(),
@@ -116,6 +162,17 @@ mod tests {
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].view, ChunkView::Code);
         assert_eq!(chunks[0].language_id, "rust");
+        assert_eq!(chunks[0].kind, "function_item");
+        assert_eq!(chunks[0].name.as_deref(), Some("main"));
         assert!(chunks[0].doc_text.is_empty());
+    }
+
+    #[test]
+    fn broken_code_falls_back_to_text_chunker() {
+        let budget = ChunkBudget::default();
+        let chunker = chunker_for_extension("rs", budget).unwrap();
+        let chunks = chunker.chunk_file("broken.rs", b"let this_is_not_item_syntax = ;");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, "file");
     }
 }

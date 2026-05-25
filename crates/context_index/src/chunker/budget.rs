@@ -11,16 +11,28 @@ pub struct ChunkBudget {
     pub maximum: usize,
     /// Windows below this are dropped (unless it is the only window).
     pub minimum: usize,
+    /// Minimum doc-comment size before a separate Doc-view chunk is emitted.
+    pub doc_view_min: usize,
 }
 
 const CHARS_PER_TOKEN: usize = 4;
 
 impl ChunkBudget {
     pub fn from_token_counts(target_tokens: u32, max_tokens: u32, min_tokens: u32) -> Self {
+        Self::from_token_counts_with_doc_view_min(target_tokens, max_tokens, min_tokens, 20)
+    }
+
+    pub fn from_token_counts_with_doc_view_min(
+        target_tokens: u32,
+        max_tokens: u32,
+        min_tokens: u32,
+        doc_view_min_tokens: u32,
+    ) -> Self {
         Self {
             target: target_tokens as usize * CHARS_PER_TOKEN,
             maximum: max_tokens as usize * CHARS_PER_TOKEN,
             minimum: min_tokens as usize * CHARS_PER_TOKEN,
+            doc_view_min: doc_view_min_tokens as usize * CHARS_PER_TOKEN,
         }
     }
 }

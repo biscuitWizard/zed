@@ -141,9 +141,8 @@ async fn test_context_index_incremental_update(cx: &mut TestAppContext) {
         })
     });
 
-    let context_index = cx.update(|cx| {
-        cx.new(|cx| ContextIndex::new(fs.clone(), worktree_store.clone(), true, cx))
-    });
+    let context_index = cx
+        .update(|cx| cx.new(|cx| ContextIndex::new(fs.clone(), worktree_store.clone(), true, cx)));
 
     cx.run_until_parked();
 

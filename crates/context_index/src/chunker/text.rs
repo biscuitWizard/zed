@@ -1,8 +1,8 @@
 use super::{
-    budget::{nws_size, ChunkBudget},
+    FileChunker,
+    budget::{ChunkBudget, nws_size},
     ids,
     types::{Chunk, ChunkView},
-    FileChunker,
 };
 
 /// Line-windowed text chunker used when no structural parser is selected.
@@ -87,8 +87,7 @@ impl TextChunker {
 
         for w in iter {
             let prev = merged.last().unwrap();
-            let combined_text =
-                String::from_utf8_lossy(&source[prev.byte_start..w.byte_end]);
+            let combined_text = String::from_utf8_lossy(&source[prev.byte_start..w.byte_end]);
             let combined_nws = nws_size(&combined_text);
 
             if combined_nws <= self.budget.target {
@@ -148,12 +147,8 @@ impl FileChunker for TextChunker {
                     String::new()
                 };
 
-                let embed_text = build_embed_text(
-                    file_path,
-                    self.language_id,
-                    &breadcrumb,
-                    &code_text,
-                );
+                let embed_text =
+                    build_embed_text(file_path, self.language_id, &breadcrumb, &code_text);
 
                 let embed_sha = ids::embed_text_sha(&embed_text);
                 let id = ids::chunk_id(file_path, byte_start, byte_end, view);
@@ -225,7 +220,11 @@ mod tests {
         let chunker = make_chunker();
         let src = make_source(200);
         let chunks = chunker.chunk_file("src/main.rs", src.as_bytes());
-        assert!(chunks.len() >= 2, "expected >=2 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "expected >=2 chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]

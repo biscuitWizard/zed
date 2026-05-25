@@ -6,12 +6,10 @@ use std::sync::Arc;
 use crate::settings::ContextIndexSettings;
 use settings::Settings as _;
 
-static EMBED_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> =
-    env_var!("CONTEXT_INDEX_EMBED_API_KEY");
+static EMBED_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> = env_var!("CONTEXT_INDEX_EMBED_API_KEY");
 static RERANK_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> =
     env_var!("CONTEXT_INDEX_RERANK_API_KEY");
-static HYDE_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> =
-    env_var!("CONTEXT_INDEX_HYDE_API_KEY");
+static HYDE_API_KEY_ENV_VAR: std::sync::LazyLock<EnvVar> = env_var!("CONTEXT_INDEX_HYDE_API_KEY");
 
 const DEFAULT_EMBED_URL: &str = "http://localhost:7997";
 const DEFAULT_RERANK_URL: &str = "http://localhost:7997";

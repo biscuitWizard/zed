@@ -14,8 +14,8 @@ pub struct ContextIndexProviderContent {
 
 /// Configuration for the project-wide context indexer.
 ///
-/// When enabled, the context indexer maintains content hashes for all text files
-/// in the project and (in a future phase) generates embeddings for semantic search.
+/// When enabled, the context indexer maintains content hashes and chunks for
+/// supported project files so semantic indexing can attach embeddings.
 #[with_fallible_options]
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ContextIndexSettingsContent {
@@ -49,6 +49,12 @@ pub struct ContextIndexSettingsContent {
     ///
     /// Default: 64
     pub chunk_min_tokens: Option<u32>,
+
+    /// Minimum doc-comment size in tokens before emitting a separate doc-view
+    /// row for a code definition.
+    ///
+    /// Default: 20
+    pub chunk_doc_view_min_tokens: Option<u32>,
 
     /// Dimensionality of the embedding vectors. Locked at LanceDB table
     /// creation time; changing this after indexing requires a reset.

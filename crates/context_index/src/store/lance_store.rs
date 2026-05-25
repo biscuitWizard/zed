@@ -1,20 +1,21 @@
-use std::path::Path;
-use std::sync::Arc;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context as _, Result};
 use arrow_array::{
-    Array, FixedSizeListArray, Int32Array, Int64Array, ListArray, RecordBatch,
-    StringArray,
+    Array, FixedSizeListArray, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use arrow_schema::Schema;
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::Table;
+use tokio::runtime::Runtime;
 
 use crate::chunker::types::Chunk;
 
-use super::schema::{chunks_schema, CHUNKS_TABLE};
+use super::schema::{CHUNKS_TABLE, chunks_schema};
 
 #[derive(Debug, Clone)]
 pub struct LanceStoreStats {
@@ -28,11 +29,188 @@ pub struct LanceStore {
     embedding_dim: usize,
 }
 
+static LANCE_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("context-index-lancedb")
+        .build()
+        .expect("failed to create context index LanceDB runtime")
+});
+
 impl LanceStore {
     /// Open or create the store at `data_dir`. On first use `embedding_dim`
     /// sets the vector column width (cannot change after table creation).
     pub async fn open(data_dir: &Path, embedding_dim: usize) -> Result<Self> {
-        std::fs::create_dir_all(data_dir)
+        let data_dir = data_dir.to_path_buf();
+        run_on_lance_runtime(async move { Self::open_inner(data_dir, embedding_dim).await }).await
+    }
+
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
+    /// Insert or replace chunk rows (vectors are null).
+    pub async fn upsert_chunks(&self, chunks: &[Chunk]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        let table = self.table.clone();
+        let embedding_dim = self.embedding_dim;
+        let chunks = chunks.to_vec();
+        run_on_lance_runtime(async move {
+            delete_by_ids(&table, &chunks).await?;
+            let batch = chunks_to_batch(&chunks, embedding_dim, None)?;
+            table
+                .add(batch)
+                .execute()
+                .await
+                .context("adding chunk rows")?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Insert or replace chunk rows with precomputed embedding vectors.
+    pub async fn upsert_chunks_with_vectors(
+        &self,
+        chunks: &[Chunk],
+        vectors: &[Vec<f32>],
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            chunks.len() == vectors.len(),
+            "chunks ({}) and vectors ({}) length mismatch",
+            chunks.len(),
+            vectors.len()
+        );
+        let table = self.table.clone();
+        let embedding_dim = self.embedding_dim;
+        let chunks = chunks.to_vec();
+        let vectors = vectors.to_vec();
+        run_on_lance_runtime(async move {
+            delete_by_ids(&table, &chunks).await?;
+            let batch = chunks_to_batch(&chunks, embedding_dim, Some(&vectors))?;
+            table
+                .add(batch)
+                .execute()
+                .await
+                .context("adding chunk rows with vectors")?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Delete every row whose `file_path` is in `paths`.
+    pub async fn delete_by_file_paths(&self, paths: &[&str]) -> Result<u64> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let table = self.table.clone();
+        let paths = paths
+            .iter()
+            .map(|path| path.to_string())
+            .collect::<Vec<_>>();
+        run_on_lance_runtime(async move {
+            let before = count_rows_table(&table).await.unwrap_or(0);
+            let in_clause = paths
+                .iter()
+                .map(|p| format!("'{}'", p.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            table
+                .delete(&format!("file_path IN ({in_clause})"))
+                .await
+                .context("deleting by file_paths")?;
+            let after = count_rows_table(&table).await.unwrap_or(0);
+            Ok(before.saturating_sub(after))
+        })
+        .await
+    }
+
+    /// Delete every chunk row while preserving the existing table schema.
+    pub async fn delete_all(&self) -> Result<u64> {
+        let table = self.table.clone();
+        run_on_lance_runtime(async move {
+            let before = count_rows_table(&table).await.unwrap_or(0);
+            table
+                .delete("id IS NOT NULL")
+                .await
+                .context("deleting all chunk rows")?;
+            let after = count_rows_table(&table).await.unwrap_or(0);
+            Ok(before.saturating_sub(after))
+        })
+        .await
+    }
+
+    /// Drop the table and recreate it empty.
+    pub async fn drop_and_recreate(&mut self, embedding_dim: usize) -> Result<()> {
+        let db = self.db.clone();
+        let table = run_on_lance_runtime(async move {
+            let _ = db.drop_table(CHUNKS_TABLE, &[]).await;
+            let schema = chunks_schema(embedding_dim);
+            let batch = empty_batch(&schema)?;
+            db.create_table(CHUNKS_TABLE, batch)
+                .execute()
+                .await
+                .context("recreating chunks table")
+        })
+        .await?;
+        self.table = table;
+        self.embedding_dim = embedding_dim;
+        Ok(())
+    }
+
+    pub async fn count_rows(&self) -> Result<u64> {
+        let table = self.table.clone();
+        run_on_lance_runtime(async move { count_rows_table(&table).await }).await
+    }
+
+    pub async fn stats(&self) -> Result<LanceStoreStats> {
+        let table = self.table.clone();
+        run_on_lance_runtime(async move {
+            let total_rows = count_rows_table(&table).await?;
+            let mut files = std::collections::HashSet::new();
+            let mut stream = table
+                .query()
+                .select(Select::columns(&["file_path"]))
+                .execute()
+                .await
+                .context("querying chunk file paths")?;
+
+            while let Some(batch) = stream
+                .try_next()
+                .await
+                .context("reading chunk file paths")?
+            {
+                let file_paths = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .context("file_path column should be Utf8")?;
+
+                for row in 0..file_paths.len() {
+                    if !file_paths.is_null(row) {
+                        files.insert(file_paths.value(row).to_string());
+                    }
+                }
+            }
+
+            Ok(LanceStoreStats {
+                total_rows,
+                files: files.len() as u64,
+            })
+        })
+        .await
+    }
+
+    // ------------------------------------------------------------------
+    // Private helpers
+    // ------------------------------------------------------------------
+
+    async fn open_inner(data_dir: PathBuf, embedding_dim: usize) -> Result<Self> {
+        std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("creating lance dir {}", data_dir.display()))?;
 
         let db = lancedb::connect(data_dir.to_str().unwrap())
@@ -62,156 +240,36 @@ impl LanceStore {
             embedding_dim,
         })
     }
+}
 
-    pub fn embedding_dim(&self) -> usize {
-        self.embedding_dim
+async fn run_on_lance_runtime<T, F>(future: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    LANCE_RUNTIME
+        .spawn(future)
+        .await
+        .context("joining LanceDB runtime task")?
+}
+
+async fn count_rows_table(table: &Table) -> Result<u64> {
+    let count = table.count_rows(None).await.context("counting rows")?;
+    Ok(count as u64)
+}
+
+async fn delete_by_ids(table: &Table, chunks: &[Chunk]) -> Result<()> {
+    if chunks.is_empty() {
+        return Ok(());
     }
-
-    /// Insert or replace chunk rows (vectors are null).
-    pub async fn upsert_chunks(&self, chunks: &[Chunk]) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        self.delete_by_ids(chunks).await?;
-        let batch = chunks_to_batch(chunks, self.embedding_dim, None)?;
-        self.table
-            .add(batch)
-            .execute()
-            .await
-            .context("adding chunk rows")?;
-        Ok(())
-    }
-
-    /// Insert or replace chunk rows with precomputed embedding vectors.
-    pub async fn upsert_chunks_with_vectors(
-        &self,
-        chunks: &[Chunk],
-        vectors: &[Vec<f32>],
-    ) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        anyhow::ensure!(
-            chunks.len() == vectors.len(),
-            "chunks ({}) and vectors ({}) length mismatch",
-            chunks.len(),
-            vectors.len()
-        );
-        self.delete_by_ids(chunks).await?;
-        let batch = chunks_to_batch(chunks, self.embedding_dim, Some(vectors))?;
-        self.table
-            .add(batch)
-            .execute()
-            .await
-            .context("adding chunk rows with vectors")?;
-        Ok(())
-    }
-
-    /// Delete every row whose `file_path` is in `paths`.
-    pub async fn delete_by_file_paths(&self, paths: &[&str]) -> Result<u64> {
-        if paths.is_empty() {
-            return Ok(0);
-        }
-        let before = self.count_rows().await.unwrap_or(0);
-        let in_clause = paths
-            .iter()
-            .map(|p| format!("'{}'", p.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.table
-            .delete(&format!("file_path IN ({in_clause})"))
-            .await
-            .context("deleting by file_paths")?;
-        let after = self.count_rows().await.unwrap_or(0);
-        Ok(before.saturating_sub(after))
-    }
-
-    /// Delete every chunk row while preserving the existing table schema.
-    pub async fn delete_all(&self) -> Result<u64> {
-        let before = self.count_rows().await.unwrap_or(0);
-        self.table
-            .delete("id IS NOT NULL")
-            .await
-            .context("deleting all chunk rows")?;
-        let after = self.count_rows().await.unwrap_or(0);
-        Ok(before.saturating_sub(after))
-    }
-
-    /// Drop the table and recreate it empty.
-    pub async fn drop_and_recreate(&mut self, embedding_dim: usize) -> Result<()> {
-        let _ = self.db.drop_table(CHUNKS_TABLE, &[]).await;
-        let schema = chunks_schema(embedding_dim);
-        let batch = empty_batch(&schema)?;
-        self.table = self
-            .db
-            .create_table(CHUNKS_TABLE, batch)
-            .execute()
-            .await
-            .context("recreating chunks table")?;
-        self.embedding_dim = embedding_dim;
-        Ok(())
-    }
-
-    pub async fn count_rows(&self) -> Result<u64> {
-        let count = self
-            .table
-            .count_rows(None)
-            .await
-            .context("counting rows")?;
-        Ok(count as u64)
-    }
-
-    pub async fn stats(&self) -> Result<LanceStoreStats> {
-        let total_rows = self.count_rows().await?;
-        let mut files = std::collections::HashSet::new();
-        let mut stream = self
-            .table
-            .query()
-            .select(Select::columns(&["file_path"]))
-            .execute()
-            .await
-            .context("querying chunk file paths")?;
-
-        while let Some(batch) = stream.try_next().await.context("reading chunk file paths")? {
-            let file_paths = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("file_path column should be Utf8")?;
-
-            for row in 0..file_paths.len() {
-                if !file_paths.is_null(row) {
-                    files.insert(file_paths.value(row).to_string());
-                }
-            }
-        }
-
-        Ok(LanceStoreStats {
-            total_rows,
-            files: files.len() as u64,
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // Private helpers
-    // ------------------------------------------------------------------
-
-    async fn delete_by_ids(&self, chunks: &[Chunk]) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        let in_clause = chunks
-            .iter()
-            .map(|c| format!("'{}'", c.id.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        // Missing ids mean the row set was already invalidated by another path.
-        let _ = self
-            .table
-            .delete(&format!("id IN ({in_clause})"))
-            .await;
-        Ok(())
-    }
+    let in_clause = chunks
+        .iter()
+        .map(|c| format!("'{}'", c.id.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Missing ids mean the row set was already invalidated by another path.
+    let _ = table.delete(&format!("id IN ({in_clause})")).await;
+    Ok(())
 }
 
 /// Build the text body used by the future full-text search index.
@@ -267,10 +325,7 @@ fn chunks_to_batch(
 
     let ref_syms = build_ref_symbols_array(chunks)?;
 
-    let fts_texts: StringArray = chunks
-        .iter()
-        .map(|c| Some(build_fts_text(c)))
-        .collect();
+    let fts_texts: StringArray = chunks.iter().map(|c| Some(build_fts_text(c))).collect();
     let embed_texts: StringArray = chunks.iter().map(|c| Some(c.embed_text.as_str())).collect();
     let embed_text_shas: StringArray = chunks
         .iter()
@@ -332,8 +387,7 @@ fn build_vector_array(
 ) -> Result<FixedSizeListArray> {
     use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
 
-    let mut builder =
-        FixedSizeListBuilder::new(Float32Builder::new(), embedding_dim as i32);
+    let mut builder = FixedSizeListBuilder::new(Float32Builder::new(), embedding_dim as i32);
 
     for i in 0..len {
         match vectors {

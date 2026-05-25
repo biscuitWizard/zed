@@ -12,6 +12,7 @@ pub struct ContextIndexSettings {
     pub chunk_target_tokens: u32,
     pub chunk_max_tokens: u32,
     pub chunk_min_tokens: u32,
+    pub chunk_doc_view_min_tokens: u32,
     pub embedding_dim: u32,
 }
 
@@ -33,6 +34,7 @@ impl settings::Settings for ContextIndexSettings {
             chunk_target_tokens: ci.chunk_target_tokens.unwrap_or(1024),
             chunk_max_tokens: ci.chunk_max_tokens.unwrap_or(3000),
             chunk_min_tokens: ci.chunk_min_tokens.unwrap_or(64),
+            chunk_doc_view_min_tokens: ci.chunk_doc_view_min_tokens.unwrap_or(20),
             embedding_dim: ci.embedding_dim.unwrap_or(2560),
         }
     }

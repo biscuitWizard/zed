@@ -7,10 +7,10 @@ pub mod settings;
 pub mod stats;
 pub mod store;
 
+use ::settings::Settings as _;
 use collections::HashMap;
 use gpui::{App, AppContext as _, Entity, EntityId, Global};
 use project::Project;
-use ::settings::Settings as _;
 
 pub use index::{ContextIndex, ContextIndexEvent};
 pub use settings::ContextIndexSettings;

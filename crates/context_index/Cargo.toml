@@ -11,6 +11,10 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["dump_chunks"]
+dump_chunks = []
+
 [dependencies]
 anyhow.workspace = true
 arrow = { workspace = true }
@@ -33,6 +37,15 @@ serde.workspace = true
 settings.workspace = true
 settings_content.workspace = true
 sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tree-sitter = { workspace = true }
+tree-sitter-c-sharp = { workspace = true }
+tree-sitter-go = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-md = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }
 util.workspace = true
 worktree.workspace = true
 zed_credentials_provider.workspace = true
